@@ -1,0 +1,9 @@
+THIRD-PARTY RESOURCES
+
+This application uses third-party resources under the following licenses:
+
+1.  RichMemo component
+    License: GNU Library General Public License v2 (LGPL-2.0)
+    with the Lazarus modified LGPL exception
+    Copyright (c) RichMemo contributors
+    https://github.com/skalogryz/richmemo
