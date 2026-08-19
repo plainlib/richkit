@@ -11,9 +11,13 @@ var
   CF_HTML_FORMAT: QWord = 0;
   CF_TEXT_HTML_FORMAT: QWord = 0;
   CF_PUBLIC_HTML_FORMAT: QWord = 0;
+  CF_RTF_FORMAT: QWord = 0;
 
 // Ensures that the known HTML clipboard formats are registered
-procedure EnsureClipboardFormatsRegistered;
+procedure EnsureHtmlFormatRegistered;
+
+// Ensures that the Rtf clipboard format are registered
+procedure EnsureRtfFormatRegistered;
 
 // Returns the HTML content from the clipboard as a string.
 // Tries several known HTML formats across platforms.
@@ -24,7 +28,7 @@ implementation
 uses
   Classes, SysUtils;
 
-procedure EnsureClipboardFormatsRegistered;
+procedure EnsureHtmlFormatRegistered;
 begin
   if CF_HTML_FORMAT = 0 then
     CF_HTML_FORMAT := RegisterClipboardFormat('HTML Format');
@@ -32,6 +36,12 @@ begin
     CF_TEXT_HTML_FORMAT := RegisterClipboardFormat('text/html');
   if CF_PUBLIC_HTML_FORMAT = 0 then
     CF_PUBLIC_HTML_FORMAT := RegisterClipboardFormat('public.html');
+end;
+
+procedure EnsureRtfFormatRegistered;
+begin
+  if CF_RTF_FORMAT = 0 then
+    CF_RTF_FORMAT := RegisterClipboardFormat('Rich Text Format');
 end;
 
 function ExtractHtmlBody(const AClipboardHtml: string): string;
@@ -62,7 +72,7 @@ var
   formatID: QWord = 0;
 begin
   Result := '';
-  EnsureClipboardFormatsRegistered;
+  EnsureHtmlFormatRegistered;
 
   formatID := 0;
 

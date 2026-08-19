@@ -5,7 +5,7 @@ unit RichMemoHelper;
 interface
 
 uses
-  RichMemo, RichMemoHelpers, StrUtils;
+  LazUtf8, RichMemo, RichMemoHelpers, StrUtils;
 
 type
   TRichMemoClipboardHelper = class helper(TRichEditForMemo) for TRichMemo
@@ -21,6 +21,11 @@ type
 
     // Detects whether the document contains rich text formatting
     function HasRichFormatting: boolean;
+
+    // Inserts the given RTF fragment at the current cursor position.
+    // The fragment should be raw RTF content (e.g., '{\b bold}') without
+    // the outer document braces and header.
+    procedure InsertRtfAtCursor(const ARtf: string);
   end;
 
 implementation
@@ -28,33 +33,73 @@ implementation
 uses
   Classes, SysUtils, Clipbrd, HtmlToRtf, RtfToHtml, ClipToHtml, clipboardhelper, stringhelper, controlshelper;
 
+procedure TRichMemoClipboardHelper.InsertRtfAtCursor(const ARtf: string);
 var
-  CF_RTF_FORMAT: QWord = 0;
-
-const
-  FormattingCommands: array[0..17] of string = (
-    '\b', '\i', '\ul', '\cf', '\highlight',
-    '\ql', '\qc', '\qj', '\li', '\ri', '\sa', '\sb', '\sl', '\tx',
-    '\strike', '\sub', '\super', '\caps');
-
-procedure EnsureRtfFormatRegistered;
+  Marker: string = '@@RTFCURSOR@@';
+  FullRtf: string;
+  OriginalRtf: string;
+  Before: string;
+  After: string;
+  MarkerPosRtf: integer;
+  MarkerPosText: integer;
+  MarkerCharPos: integer;
 begin
-  if CF_RTF_FORMAT = 0 then
-    CF_RTF_FORMAT := RegisterClipboardFormat('Rich Text Format');
+  if ARtf = '' then
+    Exit;
+
+  OriginalRtf := Self.Rtf;
+
+  // Replace current selection with the marker.
+  Self.SelText := Marker;
+
+  // Get the RTF containing the marker.
+  FullRtf := Self.Rtf;
+
+  MarkerPosRtf := Pos(Marker, FullRtf);
+  if MarkerPosRtf = 0 then
+  begin
+    Self.Rtf := OriginalRtf;
+    Exit;
+  end;
+
+  // Replace the marker with the RTF fragment followed by the marker.
+  Before := Copy(FullRtf, 1, MarkerPosRtf - 1);
+  After := Copy(FullRtf, MarkerPosRtf + Length(Marker), MaxInt);
+
+  Self.Rtf := Before + ARtf + Marker + After;
+
+  // Find the marker in the resulting plain text.
+  MarkerPosText := Pos(Marker, Self.Text);
+  if MarkerPosText = 0 then
+  begin
+    Self.Rtf := OriginalRtf;
+    Exit;
+  end;
+
+  // Pos() returns a UTF-8 byte position.
+  // RichMemo.SelStart expects a character position.
+  MarkerCharPos := UTF8Length(Copy(Self.Text, 1, MarkerPosText - 1));
+
+  // Delete the marker.
+  Self.SelStart := MarkerCharPos;
+  Self.SelLength := UTF8Length(Marker);
+  Self.SelText := '';
+
+  // Cursor is now exactly where the marker was.
+  Self.SelLength := 0;
 end;
 
 function TRichMemoClipboardHelper.PasteFromClipboardEx(AUseHtmlFormat: boolean = True): boolean;
-  {$IFDEF WINDOWS}
 var
   HtmlText: string = '';
   RtfText: string = '';
+  {$IFDEF WINDOWS}
   TempStream: TMemoryStream = nil;
   SavedFormats: TClipboardFormatDataArray = nil;
   {$ENDIF}
 begin
   Result := False;
 
-  {$IFDEF WINDOWS}
   if AUseHtmlFormat then
     HtmlText := GetHtmlFromClipboard
   else
@@ -63,6 +108,7 @@ begin
   if HtmlText = '' then
     Exit;
 
+  {$IFDEF WINDOWS}
   RtfText := ConvertHtmlToRtf(HtmlText, Self.GetActualFontSize);
   if RtfText = '' then Exit;
 
@@ -93,15 +139,22 @@ begin
     // Restore the original clipboard content
     Clipboard.RestoreAllFormats(SavedFormats);
   end;
+  {$ELSE}
+  RtfText := ConvertHtmlToRtf(HtmlText, Self.GetActualFontSize, True, True);
+  if RtfText = '' then Exit;
+  Self.InsertRtfAtCursor(RtfText);
+  Result := True;
   {$ENDIF}
 end;
 
 function TRichMemoClipboardHelper.CopyToClipboardEx: boolean;
+  {$IFDEF WINDOWS}
 var
   RtfText: string = '';
   HtmlText: string = '';
   PlainText: string = '';
   ms: TMemoryStream = nil;
+  {$ENDIF}
 begin
   Result := False;
 
@@ -109,7 +162,7 @@ begin
   if Self.SelLength = 0 then Exit;
 
   EnsureRtfFormatRegistered;
-  EnsureClipboardFormatsRegistered;
+  EnsureHtmlFormatRegistered;
 
   // Built-in copy copies the selected fragment (RTF and plain text)
   Self.CopyToClipboard;
@@ -187,6 +240,12 @@ begin
 end;
 
 function TRichMemoClipboardHelper.HasRichFormatting: boolean;
+const
+  // Local list of formatting commands. \fs is included but handled specially.
+  FormattingCommands: array[0..17] of string = (
+    '\b', '\i', '\ul', '\cf', '\highlight',
+    '\ql', '\qc', '\qj', '\li', '\ri', '\sa', '\sb', '\tx',
+    '\strike', '\sub', '\super', '\caps', '\fs');
 var
   rtfText: string = '';
   plainText: string = '';
@@ -194,8 +253,12 @@ var
   searchPos: integer = 0;
   foundPos: integer = 0;
   cmd: string = '';
-  fsValue: integer = 0;
-  digitStart: integer = 0;
+  paramPos: integer = 0;
+  paramValue: integer = 0;
+  hasParam: boolean = False;
+  isNegative: boolean = False;
+  fsFirstValue: integer = 0;
+  fsFirstSet: boolean = False;
 begin
   Result := False;
   plainText := Self.Text;
@@ -216,38 +279,83 @@ begin
         // If the backslash is escaped, it is literal text, not a command
         if not rtfText.IsEscapedBackslash(foundPos) then
         begin
-          Result := True;
-          Exit;
+          // Try to read an optional numeric parameter after the command
+          paramPos := foundPos + Length(cmd);
+          while (paramPos <= Length(rtfText)) and (rtfText[paramPos] = ' ') do
+            Inc(paramPos);
+
+          hasParam := False;
+          paramValue := 0;
+          isNegative := False;
+          if (paramPos <= Length(rtfText)) and (rtfText[paramPos] in ['0'..'9', '-']) then
+          begin
+            hasParam := True;
+            if rtfText[paramPos] = '-' then
+            begin
+              isNegative := True;
+              Inc(paramPos);
+            end;
+            while (paramPos <= Length(rtfText)) and (rtfText[paramPos] in ['0'..'9']) do
+            begin
+              paramValue := paramValue * 10 + Ord(rtfText[paramPos]) - Ord('0');
+              Inc(paramPos);
+            end;
+            if isNegative then
+              paramValue := -paramValue;
+          end;
+
+          // Decide whether this command really indicates formatting
+          if cmd = '\fs' then
+          begin
+            // Font size is formatting only if it differs from the first seen value
+            if hasParam then
+            begin
+              if not fsFirstSet then
+              begin
+                fsFirstValue := paramValue;
+                fsFirstSet := True;
+              end
+              else if paramValue <> fsFirstValue then
+              begin
+                Result := True;
+                Exit;
+              end;
+            end;
+          end
+          else if cmd = '\ql' then
+          begin
+            // Left alignment is default, ignore
+          end
+          else if (cmd = '\b') or (cmd = '\i') or (cmd = '\ul') or (cmd = '\strike') or (cmd = '\sub') or
+            (cmd = '\super') or (cmd = '\caps') then
+          begin
+            // These commands enable formatting; parameter 0 disables it
+            if (not hasParam) or (paramValue <> 0) then
+            begin
+              Result := True;
+              Exit;
+            end;
+          end
+          else
+          begin
+            // Other commands with numeric parameter (e.g. \li, \ri, \sa, \sb, \tx, \cf, \highlight)
+            if hasParam and (paramValue <> 0) then
+            begin
+              Result := True;
+              Exit;
+            end;
+            // If no parameter, consider it formatting
+            if not hasParam then
+            begin
+              Result := True;
+              Exit;
+            end;
+          end;
         end;
         searchPos := foundPos + 1;
       end;
     until foundPos = 0;
   end;
-
-  // Check for font size changes: parse \fsN and compare with default 18
-  searchPos := 1;
-  repeat
-    foundPos := PosEx('\fs', rtfText, searchPos);
-    if foundPos > 0 then
-    begin
-      if not rtfText.IsEscapedBackslash(foundPos) then
-      begin
-        digitStart := foundPos + 3; // Skip "\fs"
-        fsValue := 0;
-        while (digitStart <= Length(rtfText)) and (rtfText[digitStart] in ['0'..'9']) do
-        begin
-          fsValue := fsValue * 10 + Ord(rtfText[digitStart]) - Ord('0');
-          Inc(digitStart);
-        end;
-        if fsValue <> 18 then
-        begin
-          Result := True;
-          Exit;
-        end;
-      end;
-      searchPos := foundPos + 1;
-    end;
-  until foundPos = 0;
 end;
 
 end.

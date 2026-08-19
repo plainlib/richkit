@@ -5,7 +5,12 @@ unit RichSpellChecker;
 interface
 
 uses
-  Classes, SysUtils, Menus, Graphics, Types, RichMemo;
+  Classes, SysUtils, Menus, Graphics, Types,
+  {$IFDEF WINDOWS}
+  {$ELSE}
+  RichMemoHelpers,
+  {$ENDIF}
+  RichMemo;
 
 type
   TSpellError = record
@@ -368,6 +373,7 @@ begin
   FRichMemo.SelStart := AError^.Offset;
   FRichMemo.SelLength := AError^.Length;
   FRichMemo.SelAttributes.Style := FRichMemo.SelAttributes.Style + [fsUnderline];
+  FRichMemo.SelAttributes.Color := clMaroon;
   FRichMemo.SelLength := 0;
   {$ENDIF}
 end;
@@ -588,13 +594,13 @@ begin
 end;
 
 procedure TRichSpellChecker.RemoveError(AError: PSpellError; ANewLength: integer);
+{$IFDEF WINDOWS}
 var
   OldSelStart, OldSelLength: integer;
   scrollPos: TPoint;
-  {$IFDEF WINDOWS}
   cf: CHARFORMAT2W;
   cr: CHARRANGE;
-  {$ENDIF}
+{$ENDIF}
 begin
   {$IFDEF WINDOWS}
   if not Assigned(FRichMemo) or (AError = nil) then

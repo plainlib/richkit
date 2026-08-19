@@ -4,9 +4,12 @@ unit HtmlToRtf;
 
 interface
 
-// Convert HTML string to RTF
-// If AsFragment is True, returns only RTF content without header/footer
-function ConvertHtmlToRtf(const Html: string; DefaultFontSizePt: integer; AsFragment: boolean = False): string;
+// Convert HTML string to RTF.
+// If AsFragment is True, returns only RTF content without header/footer.
+// If UseInlineFormatting is True, inline formatting tags (b, i, u, strike)
+// are emitted as RTF control words instead of groups.
+function ConvertHtmlToRtf(const Html: string; DefaultFontSizePt: integer; AsFragment: boolean = False;
+  UseInlineFormatting: boolean = False): string;
 
 implementation
 
@@ -54,6 +57,7 @@ type
     FPendingSpace: boolean;
     FDefaultFontSize: integer; // Default font size in half-points (pt * 2)
     FAsFragment: boolean; // If True, output only RTF body without wrapping
+    FUseInlineFormatting: boolean; // If True, inline formatting uses control words
     procedure Parse;
     procedure ProcessText(const S: string);
     procedure FlushTextBuffer;
@@ -75,12 +79,12 @@ type
     procedure AddListItemMarker;
     function ExtractFontSize(const Style: string): integer;
   public
-    constructor Create(const Html: string; ADefaultFontSizePt: integer; AAsFragment: boolean);
+    constructor Create(const Html: string; ADefaultFontSizePt: integer; AAsFragment: boolean; AUseInlineFormatting: boolean);
     destructor Destroy; override;
     function Convert: string;
   end;
 
-constructor THtmlParser.Create(const Html: string; ADefaultFontSizePt: integer; AAsFragment: boolean);
+constructor THtmlParser.Create(const Html: string; ADefaultFontSizePt: integer; AAsFragment: boolean; AUseInlineFormatting: boolean);
 var
   i: integer;
 begin
@@ -100,6 +104,7 @@ begin
   FFormat.FontIndex := 0; // default Arial
   FFormat.FontSize := 0; // Default size, will use RTF default
   FAsFragment := AAsFragment;
+  FUseInlineFormatting := AUseInlineFormatting;
   FFontTable := TStringList.Create;
   FFontTable.Add('Arial');      // index 0
   FFontTable.Add('Courier New'); // index 1
@@ -140,7 +145,11 @@ begin
   // Build font table from used fonts
   FontTbl := '';
   for i := 0 to FFontTable.Count - 1 do
+  begin
+    if Trim(FFontTable[i]) = '' then
+      FFontTable[i] := 'Arial'; // fallback to avoid empty font name
     FontTbl := FontTbl + '{\f' + IntToStr(i) + '\fnil\fcharset0 ' + FFontTable[i] + ';}';
+  end;
   Result := '{\rtf1\ansi\ansicpg1251\deff0' + '{\fonttbl' + FontTbl + '}' + '{\colortbl ;\red0\green0\blue255;}' +
     '\fs' + IntToStr(FDefaultFontSize) + ' ' + FResult + '}';
 end;
@@ -358,35 +367,37 @@ end;
 procedure THtmlParser.AddText(const AText: string; Format: TFormatState);
 var
   Escaped: string;
-  FontCmd: string;
+  fmtPrefix: string;
 begin
   Escaped := EscapeRTF(AText, Format.Pre > 0);
 
-  // Apply font selection (either explicit FontIndex or Code)
+  // Build a single formatting prefix group.
+  // Inline formatting commands are not added here if UseInlineFormatting is active.
+  fmtPrefix := '';
   if Format.FontIndex > 0 then
-    FontCmd := '{\f' + IntToStr(Format.FontIndex) + ' '
-  else if Format.Code > 0 then
-    FontCmd := '{\f1 '
-  else
-    FontCmd := '';
-  if FontCmd <> '' then
-    Escaped := FontCmd + Escaped + '}';
-
-  // Apply font size if specified
+    fmtPrefix := fmtPrefix + '\f' + IntToStr(Format.FontIndex) + ' ';
+  if Format.Code > 0 then
+    fmtPrefix := fmtPrefix + '\f1 ';
   if Format.FontSize > 0 then
-    Escaped := '{\fs' + IntToStr(Format.FontSize) + ' ' + Escaped + '}';
+    fmtPrefix := fmtPrefix + '\fs' + IntToStr(Format.FontSize) + ' ';
 
-  // Apply other formatting
-  if Format.Bold > 0 then
-    Escaped := '{\b ' + Escaped + '}';
-  if Format.Italic > 0 then
-    Escaped := '{\i ' + Escaped + '}';
-  if Format.Underline > 0 then
-    Escaped := '{\ul ' + Escaped + '}';
-  if Format.Strike > 0 then
-    Escaped := '{\strike ' + Escaped + '}';
+  if not FUseInlineFormatting then
+  begin
+    if Format.Bold > 0 then
+      fmtPrefix := fmtPrefix + '\b ';
+    if Format.Italic > 0 then
+      fmtPrefix := fmtPrefix + '\i ';
+    if Format.Underline > 0 then
+      fmtPrefix := fmtPrefix + '\ul ';
+    if Format.Strike > 0 then
+      fmtPrefix := fmtPrefix + '\strike ';
+  end;
+
   if Format.Link > 0 then
-    Escaped := '{\field{\*\fldinst{HYPERLINK "' + EscapeUnicode(Format.LinkUrl) + '"}}{\fldrslt{\ul\cf1 ' + Escaped + '}}}';
+    fmtPrefix := fmtPrefix + '\ul\cf1 '; // Link styling, kept as group
+
+  if fmtPrefix <> '' then
+    Escaped := '{' + fmtPrefix + ' ' + Escaped + '}';
 
   FResult := FResult + Escaped;
 end;
@@ -651,13 +662,41 @@ var
   SizeStr: string;
   FontSizeVal: integer;
 begin
-  if Name = 'b' then Inc(FFormat.Bold)
-  else if Name = 'strong' then Inc(FFormat.Bold)
-  else if Name = 'i' then Inc(FFormat.Italic)
-  else if Name = 'em' then Inc(FFormat.Italic)
-  else if Name = 'u' then Inc(FFormat.Underline)
-  else if Name = 'ins' then Inc(FFormat.Underline)
-  else if (Name = 'del') or (Name = 's') or (Name = 'strike') then Inc(FFormat.Strike)
+  if Name = 'b' then
+  begin
+    Inc(FFormat.Bold);
+    if FUseInlineFormatting then FResult := FResult + '\b ';
+  end
+  else if Name = 'strong' then
+  begin
+    Inc(FFormat.Bold);
+    if FUseInlineFormatting then FResult := FResult + '\b ';
+  end
+  else if Name = 'i' then
+  begin
+    Inc(FFormat.Italic);
+    if FUseInlineFormatting then FResult := FResult + '\i ';
+  end
+  else if Name = 'em' then
+  begin
+    Inc(FFormat.Italic);
+    if FUseInlineFormatting then FResult := FResult + '\i ';
+  end
+  else if Name = 'u' then
+  begin
+    Inc(FFormat.Underline);
+    if FUseInlineFormatting then FResult := FResult + '\ul ';
+  end
+  else if Name = 'ins' then
+  begin
+    Inc(FFormat.Underline);
+    if FUseInlineFormatting then FResult := FResult + '\ul ';
+  end
+  else if (Name = 'del') or (Name = 's') or (Name = 'strike') then
+  begin
+    Inc(FFormat.Strike);
+    if FUseInlineFormatting then FResult := FResult + '\strike ';
+  end
   else if Name = 'code' then Inc(FFormat.Code)
   else if Name = 'kbd' then Inc(FFormat.Code)
   else if Name = 'samp' then Inc(FFormat.Code)
@@ -746,7 +785,6 @@ begin
         end;
       end;
     end;
-
   end
   else if Name = 'p' then
   begin
@@ -773,6 +811,7 @@ begin
   begin
     AddParIfNeeded;
     Inc(FFormat.Bold);
+    if FUseInlineFormatting then FResult := FResult + '\b ';
     // Set heading sizes relative to default font size.
     // Additions are in half-points: 12pt -> 24, 8pt -> 16, 6pt -> 12, 4pt -> 8, 2pt -> 4, 1pt -> 2
     if Name = 'h1' then FFormat.FontSize := FDefaultFontSize + 24
@@ -850,31 +889,59 @@ procedure THtmlParser.ProcessClosingTag(const Name: string);
 begin
   if Name = 'b' then
   begin
-    if FFormat.Bold > 0 then Dec(FFormat.Bold);
+    if FFormat.Bold > 0 then
+    begin
+      Dec(FFormat.Bold);
+      if FUseInlineFormatting then FResult := FResult + '\b0';
+    end;
   end
   else if Name = 'strong' then
   begin
-    if FFormat.Bold > 0 then Dec(FFormat.Bold);
+    if FFormat.Bold > 0 then
+    begin
+      Dec(FFormat.Bold);
+      if FUseInlineFormatting then FResult := FResult + '\b0';
+    end;
   end
   else if Name = 'i' then
   begin
-    if FFormat.Italic > 0 then Dec(FFormat.Italic);
+    if FFormat.Italic > 0 then
+    begin
+      Dec(FFormat.Italic);
+      if FUseInlineFormatting then FResult := FResult + '\i0';
+    end;
   end
   else if Name = 'em' then
   begin
-    if FFormat.Italic > 0 then Dec(FFormat.Italic);
+    if FFormat.Italic > 0 then
+    begin
+      Dec(FFormat.Italic);
+      if FUseInlineFormatting then FResult := FResult + '\i0';
+    end;
   end
   else if Name = 'u' then
   begin
-    if FFormat.Underline > 0 then Dec(FFormat.Underline);
+    if FFormat.Underline > 0 then
+    begin
+      Dec(FFormat.Underline);
+      if FUseInlineFormatting then FResult := FResult + '\ul0';
+    end;
   end
   else if Name = 'ins' then
   begin
-    if FFormat.Underline > 0 then Dec(FFormat.Underline);
+    if FFormat.Underline > 0 then
+    begin
+      Dec(FFormat.Underline);
+      if FUseInlineFormatting then FResult := FResult + '\ul0';
+    end;
   end
   else if (Name = 'del') or (Name = 's') or (Name = 'strike') then
   begin
-    if FFormat.Strike > 0 then Dec(FFormat.Strike);
+    if FFormat.Strike > 0 then
+    begin
+      Dec(FFormat.Strike);
+      if FUseInlineFormatting then FResult := FResult + '\strike0';
+    end;
   end
   else if Name = 'code' then
   begin
@@ -934,7 +1001,11 @@ begin
   end
   else if (Name = 'h1') or (Name = 'h2') or (Name = 'h3') or (Name = 'h4') or (Name = 'h5') or (Name = 'h6') then
   begin
-    if FFormat.Bold > 0 then Dec(FFormat.Bold);
+    if FFormat.Bold > 0 then
+    begin
+      Dec(FFormat.Bold);
+      if FUseInlineFormatting then FResult := FResult + '\b0';
+    end;
     FFormat.FontSize := 0; // Reset to default size
     AddParIfNeeded;
     // Add an empty line after h block
@@ -1029,11 +1100,12 @@ begin
   Result := StrToIntDef(numStr, 0);
 end;
 
-function ConvertHtmlToRtf(const Html: string; DefaultFontSizePt: integer; AsFragment: boolean = False): string;
+function ConvertHtmlToRtf(const Html: string; DefaultFontSizePt: integer; AsFragment: boolean = False;
+  UseInlineFormatting: boolean = False): string;
 var
   Parser: THtmlParser;
 begin
-  Parser := THtmlParser.Create(Html, DefaultFontSizePt, AsFragment);
+  Parser := THtmlParser.Create(Html, DefaultFontSizePt, AsFragment, UseInlineFormatting);
   try
     Result := Parser.Convert;
   finally
