@@ -17,16 +17,16 @@ type
   TSpell = class
   public
     // Checks the text of a RichMemo for spelling and/or grammar errors and applies wavy underlines
-    class procedure CheckWinApi(ARichMemo: TRichMemo; ASpellChecker: TRichSpellChecker; const ALanguage: string;
+    class procedure WinCheck(ARichMemo: TRichMemo; ASpellChecker: TRichSpellChecker; const ALanguage: string;
       AOptions: TSpellCheckOptions; AAddEmptySuggestions: boolean = False); static;
 
     // Returns a list of all available spell checker language tags in BCP-47 format
-    class function GetSupportedLanguages: TStrings; static;
+    class function WinSupportedLanguages: TStrings; static;
   end;
 
 implementation
 
-class procedure TSpell.CheckWinApi(ARichMemo: TRichMemo; ASpellChecker: TRichSpellChecker; const ALanguage: string;
+class procedure TSpell.WinCheck(ARichMemo: TRichMemo; ASpellChecker: TRichSpellChecker; const ALanguage: string;
   AOptions: TSpellCheckOptions; AAddEmptySuggestions: boolean = False);
 {$IFDEF WINDOWS}
 var
@@ -99,7 +99,7 @@ begin
   {$ENDIF}
 end;
 
-class function TSpell.GetSupportedLanguages: TStrings;
+class function TSpell.WinSupportedLanguages: TStrings;
   {$IFDEF WINDOWS}
 var
   Langs: TSupportedLanguages;
