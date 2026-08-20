@@ -25,6 +25,8 @@ type
 
   TSpellErrorArray = array of TSpellError;
 
+  TSupportedLanguages = array of widestring;
+
   IEnumString = interface(IUnknown)
     ['{00000101-0000-0000-C000-000000000046}']
     function Next(celt: longword; out rgelt: pwidechar; out pceltFetched: longword): HRESULT; stdcall;
@@ -75,6 +77,12 @@ const
   CLSID_SpellCheckerFactory: TGUID =
     '{7AB36653-1796-484B-BDFA-E74F1DB7C1DC}';
 
+// Converts a UTF-16 index into a byte index in the original UTF-8 string
+function Utf16IndexToUtf8Byte(const Utf8Str: string; Utf16Index: integer): integer;
+
+// Converts a UTF-16 index to a 1-based character (code point) index in the UTF-8 string
+function Utf16ToUtf8CharIndex(const Utf8Str: string; Utf16Index: integer): integer;
+
 // Checks the spelling of the given text using the Windows Spell Checking API
 function CheckSpelling(const Text: widestring; const LanguageTag: string; out Errors: TSpellErrorArray): boolean;
 
@@ -84,17 +92,46 @@ function NormalizeLanguageTag(const Input: string): widestring;
 // Check if a given BCP-47 language tag is supported by the Windows spell checker
 function IsLanguageSupported(const LanguageTag: widestring): boolean;
 
-// Converts a UTF-16 index into a byte index in the original UTF-8 string
-function Utf16IndexToUtf8Byte(const Utf8Str: string; Utf16Index: integer): integer;
-
-// Converts a UTF-16 index to a 1-based character (code point) index in the UTF-8 string
-function Utf16ToUtf8CharIndex(const Utf8Str: string; Utf16Index: integer): integer;
+// Returns a list of all available spell checker language tags in BCP-47 format
+function GetSupportedSpellCheckerLanguages: TSupportedLanguages;
 
 {$ENDIF}
 
 implementation
 
 {$IFDEF WINDOWS}
+
+function Utf16IndexToUtf8Byte(const Utf8Str: string; Utf16Index: integer): integer;
+var
+  WideStr: widestring = '';
+  i: integer = 0;
+  BytePos: integer = 1;
+begin
+  Result := -1;
+  WideStr := UTF8Decode(Utf8Str);
+  if (Utf16Index < 0) or (Utf16Index > Length(WideStr)) then Exit;
+
+  BytePos := 1;
+  {$NOTES OFF}
+  for i := 1 to Utf16Index do
+    BytePos := BytePos + UTF8CodepointSize(@Utf8Str[BytePos]);
+  {$NOTES ON}
+
+  Result := BytePos;
+end;
+
+function Utf16ToUtf8CharIndex(const Utf8Str: string; Utf16Index: integer): integer;
+var
+  ByteIndex: integer;
+begin
+  ByteIndex := Utf16IndexToUtf8Byte(Utf8Str, Utf16Index);
+
+  if ByteIndex < 0 then
+    Exit(-1);
+
+  // Utf16IndexToUtf8Byte returns a 1-based byte position
+  Result := UTF8Length(Copy(Utf8Str, 1, ByteIndex - 1));
+end;
 
 function CheckSpelling(const Text: widestring; const LanguageTag: string; out Errors: TSpellErrorArray): boolean;
 var
@@ -255,36 +292,35 @@ begin
     Result := True;
 end;
 
-function Utf16IndexToUtf8Byte(const Utf8Str: string; Utf16Index: integer): integer;
+function GetSupportedSpellCheckerLanguages: TSupportedLanguages;
 var
-  WideStr: widestring = '';
-  i: integer = 0;
-  BytePos: integer = 1;
+  factory: ISpellCheckerFactory = nil;
+  enum: IEnumString = nil;
+  lang: pwidechar = nil;
+  fetched: longword = 0;
+  hr: HRESULT;
+  langList: TSupportedLanguages = nil;
 begin
-  Result := -1;
-  WideStr := UTF8Decode(Utf8Str);
-  if (Utf16Index < 0) or (Utf16Index > Length(WideStr)) then Exit;
+  Result := nil;
 
-  BytePos := 1;
-  {$NOTES OFF}
-  for i := 1 to Utf16Index do
-    BytePos := BytePos + UTF8CodepointSize(@Utf8Str[BytePos]);
-  {$NOTES ON}
+  hr := CoCreateInstance(CLSID_SpellCheckerFactory, nil, CLSCTX_INPROC_SERVER, ISpellCheckerFactory, factory);
+  if Failed(hr) then Exit;
 
-  Result := BytePos;
-end;
+  hr := factory.GetSupportedLanguages(enum);
+  if Failed(hr) or (enum = nil) then Exit;
 
-function Utf16ToUtf8CharIndex(const Utf8Str: string; Utf16Index: integer): integer;
-var
-  ByteIndex: integer;
-begin
-  ByteIndex := Utf16IndexToUtf8Byte(Utf8Str, Utf16Index);
+  while enum.Next(1, lang, fetched) = S_OK do
+  begin
+    if fetched = 0 then Break;
 
-  if ByteIndex < 0 then
-    Exit(-1);
+    SetLength(langList, Length(langList) + 1);
+    langList[High(langList)] := lang;
 
-  // Utf16IndexToUtf8Byte returns a 1-based byte position
-  Result := UTF8Length(Copy(Utf8Str, 1, ByteIndex - 1));
+    CoTaskMemFree(lang);
+    lang := nil;
+  end;
+
+  Result := langList;
 end;
 
 {$ENDIF}

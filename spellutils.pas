@@ -19,6 +19,8 @@ type
     // Checks the text of a RichMemo for spelling errors and applies wavy underlines
     class procedure CheckWinApi(ARichMemo: TRichMemo; ASpellChecker: TRichSpellChecker; const ALanguage: string); static;
 
+    // Returns a list of all available spell checker language tags in BCP-47 format
+    class function GetSupportedLanguages: TStrings; static;
   end;
 
 implementation
@@ -79,6 +81,25 @@ begin
   finally
     ASpellChecker.EndUpdate;
   end;
+  {$ENDIF}
+end;
+
+class function TSpell.GetSupportedLanguages: TStrings;
+  {$IFDEF WINDOWS}
+var
+  Langs: TSupportedLanguages;
+  i: integer;
+  LangList: TStringList;
+  {$ENDIF}
+begin
+  {$IFDEF WINDOWS}
+  LangList := TStringList.Create;
+  Langs := GetSupportedSpellCheckerLanguages;
+  for i := 0 to High(Langs) do
+    LangList.Add(UTF8Encode(Langs[i]));
+  Result := LangList;
+  {$ELSE}
+  Result := TStringList.Create; // Empty list on non-Windows platforms
   {$ENDIF}
 end;
 
