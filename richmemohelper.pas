@@ -11,10 +11,24 @@ unit RichMemoHelper;
 interface
 
 uses
-  LazUtf8, RichMemo, RichMemoHelpers, StrUtils;
+  Controls,
+  Classes,
+  Graphics,
+  Types,
+  SysUtils,
+  StrUtils,
+  Clipbrd,
+  {$IFDEF WINDOWS}
+  Windows,
+  ActiveX,
+  {$ENDIF}
+  LCLType,
+  LazUtf8,
+  RichMemo,
+  RichMemoHelpers;
 
 type
-  TRichMemoClipboardHelper = class helper(TRichEditForMemo) for TRichMemo
+  TRichMemoHelper = class helper(TRichEditForMemo) for TRichMemo
   public
     // Paste HTML content from clipboard as RTF at cursor position
     function PasteFromClipboardEx(AUseHtmlFormat: boolean = True): boolean;
@@ -32,14 +46,29 @@ type
     // The fragment should be raw RTF content (e.g., '{\b bold}') without
     // the outer document braces and header.
     procedure InsertRtfAtCursor(const ARtf: string);
+
+    // Inserts clipboard text, normalizing all line endings to LineEnding.
+    procedure PasteWithLineEnding;
+
+    // Returns the free space below the text in the memo's client area.
+    function GetBottomSpace: integer;
+
+    // Safely saves memo text to file, silently ignoring any errors.
+    procedure SaveToFileSafe(AFileName: string);
+
+    // Selects the token at APos, treating AExtraChars as part of word characters.
+    procedure MemoTokenAtPos(APos: integer; const AExtraChars: unicodestring);
+
+    // Disable built-in OLE drag-and-drop (text dragging within RichMemo and receiving from outside)
+    procedure DisableBuiltInDragDrop;
   end;
 
 implementation
 
 uses
-  Classes, SysUtils, Clipbrd, HtmlToRtf, RtfToHtml, ClipToHtml, clipboardhelper, stringhelper, controlshelper;
+  HtmlToRtf, RtfToHtml, ClipToHtml, clipboardhelper, stringhelper, controlshelper;
 
-procedure TRichMemoClipboardHelper.InsertRtfAtCursor(const ARtf: string);
+procedure TRichMemoHelper.InsertRtfAtCursor(const ARtf: string);
 var
   Marker: string = '@@RTFCURSOR@@';
   FullRtf: string;
@@ -95,7 +124,7 @@ begin
   Self.SelLength := 0;
 end;
 
-function TRichMemoClipboardHelper.PasteFromClipboardEx(AUseHtmlFormat: boolean = True): boolean;
+function TRichMemoHelper.PasteFromClipboardEx(AUseHtmlFormat: boolean = True): boolean;
 var
   HtmlText: string = '';
   RtfText: string = '';
@@ -153,7 +182,7 @@ begin
   {$ENDIF}
 end;
 
-function TRichMemoClipboardHelper.CopyToClipboardEx: boolean;
+function TRichMemoHelper.CopyToClipboardEx: boolean;
   {$IFDEF WINDOWS}
 var
   RtfText: string = '';
@@ -229,7 +258,7 @@ begin
   {$ENDIF}
 end;
 
-function TRichMemoClipboardHelper.CutToClipboardEx: boolean;
+function TRichMemoHelper.CutToClipboardEx: boolean;
 begin
   Result := False;
 
@@ -245,7 +274,7 @@ begin
   {$ENDIF}
 end;
 
-function TRichMemoClipboardHelper.HasRichFormatting: boolean;
+function TRichMemoHelper.HasRichFormatting: boolean;
 const
   // Local list of formatting commands. \fs is included but handled specially.
   FormattingCommands: array[0..17] of string = (
@@ -362,6 +391,186 @@ begin
       end;
     until foundPos = 0;
   end;
+end;
+
+procedure TRichMemoHelper.PasteWithLineEnding;
+var
+  s: string;
+begin
+  if Clipboard.HasFormat(CF_TEXT) then
+  begin
+    s := Clipboard.AsText;
+
+    s := StringReplace(s, #13#10, #10, [rfReplaceAll]); // Windows CRLF -> LF
+    s := StringReplace(s, #13, #10, [rfReplaceAll]);   // Macintosh CR -> LF
+    s := StringReplace(s, #10, LineEnding, [rfReplaceAll]); // LF -> platform line ending
+
+    Self.SelText := s;
+  end;
+end;
+
+function TRichMemoHelper.GetBottomSpace: integer;
+var
+  Bmp: Graphics.TBitmap;
+  TextRect: TRect;
+  Txt: string;
+  Flags: cardinal;
+begin
+  Txt := Self.Text;                     // or Self.Lines.Text
+  if Txt = '' then
+  begin
+    Result := Self.ClientHeight;        // entire client area is free
+    Exit;
+  end;
+
+  // Base flags: calculate rectangle, edit control behaviour, no accelerators
+  Flags := DT_CALCRECT or DT_EDITCONTROL or DT_NOPREFIX;
+  if Self.WordWrap then
+    Flags := Flags or DT_WORDBREAK;
+
+  Bmp := Graphics.TBitmap.Create;
+  try
+    Bmp.Canvas.Font.Assign(Self.Font);
+
+    // Width for calculation: ClientWidth minus a small inner margin (optional)
+    // With WordWrap, width is limited to ClientWidth, otherwise use a very large width
+    if Self.WordWrap then
+      TextRect := Types.Rect(0, 0, Self.ClientWidth - 4, 0)
+    else
+      TextRect := Types.Rect(0, 0, 32767, 0);  // large enough to avoid wrapping
+
+    DrawText(
+      Bmp.Canvas.Handle,
+      PChar(Txt),
+      Length(Txt),
+      TextRect,
+      Flags
+      );
+
+    // Free space = visible height – actual text height
+    Result := Self.ClientHeight - (TextRect.Bottom - TextRect.Top);
+    if Result < 0 then
+      Result := 0;
+  finally
+    Bmp.Free;
+  end;
+end;
+
+procedure TRichMemoHelper.SaveToFileSafe(AFileName: string);
+begin
+  try
+    with TStringList.Create do
+    try
+      Text := Self.Text;
+      TrailingLineBreak := False;
+      SaveToFile(AFileName);
+    finally
+      Free;
+    end;
+  except
+    on E: Exception do
+      // Do nothing if can't save current text files
+  end;
+end;
+
+procedure TRichMemoHelper.MemoTokenAtPos(APos: integer; const AExtraChars: unicodestring);
+var
+  Value: unicodestring;
+  Pos1, LeftIdx, RightIdx, LenText: integer;
+  Ch: widechar;
+
+  function IsLetterOrDigit(ch: widechar): boolean;
+  begin
+    Result := (ch in ['0'..'9', 'A'..'Z', 'a'..'z']) or (ch > #127);
+  end;
+
+  function IsExtraChar(ACh: widechar): boolean;
+  begin
+    Result := Pos(ACh, AExtraChars) > 0;
+  end;
+
+  function CharType(ACh: widechar): integer;
+  begin
+    // 1 = letter or digit
+    // 2 = space
+    // 3 = other symbol
+    if IsLetterOrDigit(ACh) or IsExtraChar(ACh) then
+      Result := 1
+    else if ACh = ' ' then
+      Result := 2
+    else
+      Result := 3;
+  end;
+
+begin
+  Value := unicodestring(Self.Text);
+  LenText := Length(Value);
+  if LenText = 0 then Exit;
+
+  Pos1 := APos + 1;
+  if Pos1 < 1 then Pos1 := 1;
+  if Pos1 > LenText then Pos1 := LenText;
+
+  Ch := Value[Pos1];
+  LeftIdx := Pos1;
+  RightIdx := Pos1 + 1;
+
+  case CharType(Ch) of
+    1:
+    begin
+      while (LeftIdx > 1) and (CharType(Value[LeftIdx - 1]) = 1) do Dec(LeftIdx);
+      while (RightIdx <= LenText) and (CharType(Value[RightIdx]) = 1) do Inc(RightIdx);
+
+      while (LeftIdx > 2) and (Value[LeftIdx - 1] = '.') and (CharType(Value[LeftIdx - 2]) = 1) do
+      begin
+        Dec(LeftIdx);
+        while (LeftIdx > 1) and (CharType(Value[LeftIdx - 1]) = 1) do Dec(LeftIdx);
+      end;
+
+      while (RightIdx < LenText) and (Value[RightIdx] = '.') and (CharType(Value[RightIdx + 1]) = 1) do
+      begin
+        Inc(RightIdx);
+        while (RightIdx <= LenText) and (CharType(Value[RightIdx]) = 1) do Inc(RightIdx);
+      end;
+    end;
+
+    2:
+    begin
+      while (LeftIdx > 1) and (Value[LeftIdx - 1] = ' ') do Dec(LeftIdx);
+      while (RightIdx <= LenText) and (Value[RightIdx] = ' ') do Inc(RightIdx);
+    end;
+
+    3:
+    begin
+      while (LeftIdx > 1) and (Value[LeftIdx - 1] = Ch) do Dec(LeftIdx);
+      while (RightIdx <= LenText) and (Value[RightIdx] = Ch) do Inc(RightIdx);
+    end;
+  end;
+
+  Self.SelStart := LeftIdx - 1;
+  Self.SelLength := RightIdx - LeftIdx;
+end;
+
+procedure TRichMemoHelper.DisableBuiltInDragDrop;
+{$IFDEF WINDOWS}
+const
+  ES_NOOLEDRAGDROP = $0008;
+var
+  Style: nativeuint;
+{$ENDIF}
+begin
+  {$IFDEF WINDOWS}
+  HandleNeeded;
+
+  Style := GetWindowLongPtr(Handle, GWL_STYLE);
+
+  // Add the style only if it is not already present.
+  if (Style and ES_NOOLEDRAGDROP) = 0 then
+    SetWindowLongPtr(Handle, GWL_STYLE, Style or ES_NOOLEDRAGDROP);
+
+  // Revoke any existing OLE drop target (cheap operation).
+  RevokeDragDrop(Handle);
+  {$ENDIF}
 end;
 
 end.
