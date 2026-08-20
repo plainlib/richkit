@@ -11,13 +11,14 @@ unit SpellUtils;
 interface
 
 uses
-  Classes, SysUtils, RichMemo, RichSpellChecker, WinSpellChecker;
+  Classes, SysUtils, Graphics, RichMemo, RichSpellChecker, WinSpellChecker;
 
 type
   TSpell = class
   public
-    // Checks the text of a RichMemo for spelling errors and applies wavy underlines
-    class procedure CheckWinApi(ARichMemo: TRichMemo; ASpellChecker: TRichSpellChecker; const ALanguage: string); static;
+    // Checks the text of a RichMemo for spelling and/or grammar errors and applies wavy underlines
+    class procedure CheckWinApi(ARichMemo: TRichMemo; ASpellChecker: TRichSpellChecker; const ALanguage: string;
+      AOptions: TSpellCheckOptions); static;
 
     // Returns a list of all available spell checker language tags in BCP-47 format
     class function GetSupportedLanguages: TStrings; static;
@@ -25,7 +26,8 @@ type
 
 implementation
 
-class procedure TSpell.CheckWinApi(ARichMemo: TRichMemo; ASpellChecker: TRichSpellChecker; const ALanguage: string);
+class procedure TSpell.CheckWinApi(ARichMemo: TRichMemo; ASpellChecker: TRichSpellChecker; const ALanguage: string;
+  AOptions: TSpellCheckOptions);
 {$IFDEF WINDOWS}
 var
   WideText: widestring;
@@ -40,12 +42,24 @@ begin
   if not Assigned(ARichMemo) or not Assigned(ASpellChecker) then
     Exit;
 
+  // If no options selected, clear previous underlines and exit
+  if AOptions = [] then
+  begin
+    ASpellChecker.BeginUpdate;
+    try
+      ASpellChecker.Clear;
+    finally
+      ASpellChecker.EndUpdate;
+    end;
+    Exit;
+  end;
+
   // Get the text and convert it to WideString for the spell checker
   Utf8Text := ARichMemo.Text;
   WideText := UTF8Decode(Utf8Text);
 
-  // Run the spell check
-  if not CheckSpelling(WideText, ALanguage, Errors) then
+  // Run the spell check with the specified options
+  if not CheckSpelling(WideText, ALanguage, Errors, AOptions) then
     Exit;
 
   // Clear previous underlines
@@ -71,12 +85,10 @@ begin
         SuggestionList[j] := UTF8Encode(Errors[i].Suggestions[j]);
 
       // Add the error using UTF-8 character positions
-      ASpellChecker.AddError(
-        StartPos,
-        ErrorLength,
-        'Spelling error',
-        SuggestionList
-        );
+    if Errors[i].ErrorType = setGrammar then
+      ASpellChecker.AddError(StartPos, ErrorLength, 'Grammar error', SuggestionList, clGreen)
+    else
+      ASpellChecker.AddError(StartPos, ErrorLength, 'Spelling error', SuggestionList, clRed);
     end;
   finally
     ASpellChecker.EndUpdate;

@@ -24,6 +24,7 @@ type
     Length: integer;
     Message: string;
     Replacements: TStringList;
+    Color: TColor;
   end;
   PSpellError = ^TSpellError;
 
@@ -50,7 +51,7 @@ type
     procedure Clear;
     procedure BeginUpdate;
     procedure EndUpdate;
-    procedure AddError(AOffset, ALength: integer; const AMessage: string; const AReplacements: array of string);
+    procedure AddError(AOffset, ALength: integer; const AMessage: string; const AReplacements: array of string; AColor: TColor = clRed);
     procedure ApplyUnderlines;
     procedure ShowContextMenu(X, Y: integer);
     procedure ReplaceError(AError: PSpellError; const ANewText: string; NewCaretPos: integer = -1);
@@ -80,7 +81,6 @@ const
   CFE_UNDERLINE = $00000004;
   CFU_UNDERLINENONE = 0;
   CFU_UNDERLINEWAVE = 8;
-  UNDERLINE_COLOR_RED = 6;
 
   EM_GETSCROLLPOS = WM_USER + 221;
   EM_SETSCROLLPOS = WM_USER + 222;
@@ -115,6 +115,28 @@ type
     bAnimation: Byte;
     bRevAuthor: Byte;
     bUnderlineColor: Byte;
+  end;
+
+
+  function MapColorToWinUnderline(AColor: TColor): Byte;
+  const
+    // Windows underline color indices (user may adjust these)
+    UNDERLINE_COLOR_BLACK   = 0;
+    UNDERLINE_COLOR_BLUE    = 2;
+    UNDERLINE_COLOR_GREEN   = 4;
+    UNDERLINE_COLOR_FUCHSIA = 5;
+    UNDERLINE_COLOR_RED     = 6;
+  begin
+    case AColor of
+      clBlack:   Result := UNDERLINE_COLOR_BLACK;
+      clBlue:    Result := UNDERLINE_COLOR_BLUE;
+      clGreen:   Result := UNDERLINE_COLOR_GREEN;
+      clFuchsia: Result := UNDERLINE_COLOR_FUCHSIA;
+      clRed:     Result := UNDERLINE_COLOR_RED;
+    else
+      // Fallback to red for any unlisted color
+      Result := UNDERLINE_COLOR_RED;
+    end;
   end;
 {$ENDIF}
 
@@ -319,7 +341,8 @@ begin
   {$ENDIF}
 end;
 
-procedure TRichSpellChecker.AddError(AOffset, ALength: integer; const AMessage: string; const AReplacements: array of string);
+procedure TRichSpellChecker.AddError(AOffset, ALength: integer; const AMessage: string; const AReplacements: array of string;
+  AColor: TColor = clRed);
 var
   err: PSpellError;
   i: integer;
@@ -329,6 +352,7 @@ begin
   err^.Length := ALength;
   err^.Message := AMessage;
   err^.Replacements := TStringList.Create;
+  err^.Color := AColor;
   for i := Low(AReplacements) to High(AReplacements) do
     err^.Replacements.Add(AReplacements[i]);
 
@@ -362,7 +386,7 @@ begin
     cf.dwMask := CFM_UNDERLINE or CFM_UNDERLINETYPE or CFM_UNDERLINECOLOR;
     cf.dwEffects := CFE_UNDERLINE;
     cf.bUnderlineType := CFU_UNDERLINEWAVE;
-    cf.bUnderlineColor := UNDERLINE_COLOR_RED;
+    cf.bUnderlineColor := MapColorToWinUnderline(AError^.Color);
 
     {$HINTS OFF}
     SendMessage(FRichMemo.Handle, EM_SETCHARFORMAT, SCF_SELECTION, LPARAM(PtrInt(@cf)));
@@ -379,7 +403,7 @@ begin
   FRichMemo.SelStart := AError^.Offset;
   FRichMemo.SelLength := AError^.Length;
   FRichMemo.SelAttributes.Style := FRichMemo.SelAttributes.Style + [fsUnderline];
-  FRichMemo.SelAttributes.Color := clMaroon;
+  FRichMemo.SelAttributes.Color := AError^.Color;
   FRichMemo.SelLength := 0;
   {$ENDIF}
 end;

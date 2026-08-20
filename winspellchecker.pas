@@ -17,15 +17,22 @@ uses
   Classes, SysUtils, ActiveX, ComObj, LazUTF8;
 
 type
+  // Note: ErrorType is determined heuristically and may not be 100% reliable
+  TSpellErrorType = (setSpelling, setGrammar);
+
   TSpellError = record
     Start: integer;
     Length: integer;
     Suggestions: array of widestring;
+    ErrorType: TSpellErrorType;
   end;
 
   TSpellErrorArray = array of TSpellError;
 
   TSupportedLanguages = array of widestring;
+
+  TSpellCheckOption = (scoSpelling, scoGrammar);
+  TSpellCheckOptions = set of TSpellCheckOption;
 
   IEnumString = interface(IUnknown)
     ['{00000101-0000-0000-C000-000000000046}']
@@ -83,8 +90,11 @@ function Utf16IndexToUtf8Byte(const Utf8Str: string; Utf16Index: integer): integ
 // Converts a UTF-16 index to a 1-based character (code point) index in the UTF-8 string
 function Utf16ToUtf8CharIndex(const Utf8Str: string; Utf16Index: integer): integer;
 
-// Checks the spelling of the given text using the Windows Spell Checking API
+// Checks spelling only (uses default options [scoSpelling])
 function CheckSpelling(const Text: widestring; const LanguageTag: string; out Errors: TSpellErrorArray): boolean;
+
+// Checks spelling and/or grammar based on Options
+function CheckSpelling(const Text: widestring; const LanguageTag: string; out Errors: TSpellErrorArray; Options: TSpellCheckOptions): boolean; overload;
 
 // Normalize a language tag to BCP-47 format (e.g., "ru" -> "ru-RU", "ru-ru" -> "ru-RU")
 function NormalizeLanguageTag(const Input: string): widestring;
@@ -133,85 +143,50 @@ begin
   Result := UTF8Length(Copy(Utf8Str, 1, ByteIndex - 1));
 end;
 
-function CheckSpelling(const Text: widestring; const LanguageTag: string; out Errors: TSpellErrorArray): boolean;
+procedure ExtractErrorsFromEnum(const Text: widestring; checker: ISpellChecker; enum: IEnumSpellingError; out ErrorArray: TSpellErrorArray);
 var
-  factory: ISpellCheckerFactory = nil;
-  checker: ISpellChecker = nil;
-  errorEnum: IEnumSpellingError = nil;
   errorItem: ISpellingError = nil;
   suggEnum: IEnumString = nil;
   sugg: pwidechar = nil;
   startIdx: longword = 0;
   errLen: longword = 0;
   fetched: longword = 0;
-  errorCount: integer = 0;
-  errorIndex: integer = 0;
   hr: HRESULT;
-  NormalizedTag: widestring = '';
   word: widestring;
+  tempErrors: TSpellErrorArray = nil;
+  currentIndex: integer = 0;
 begin
-  Result := False;
-  Errors := nil;
+  ErrorArray := nil;
 
-  if Text = '' then
-    Exit;
+  if enum = nil then Exit;
 
-  // Normalize and verify language
-  NormalizedTag := NormalizeLanguageTag(LanguageTag);
-  if NormalizedTag = '' then Exit;
-  if not IsLanguageSupported(NormalizedTag) then Exit;
-
-  hr := CoCreateInstance(CLSID_SpellCheckerFactory, nil, CLSCTX_INPROC_SERVER, ISpellCheckerFactory, factory);
-
-  if Failed(hr) then
-    Exit;
-
-  hr := factory.CreateSpellChecker(pwidechar(NormalizedTag), checker);
-  if Failed(hr) then
-    Exit;
-
-  hr := checker.Check(pwidechar(Text), errorEnum);
-  if Failed(hr) or (errorEnum = nil) then
-    Exit;
-
-  while errorEnum.Next(errorItem) = S_OK do
+  while enum.Next(errorItem) = S_OK do
   begin
-    Inc(errorCount);
-    errorItem := nil;
-  end;
+    if errorItem = nil then Continue;
 
-  if errorCount = 0 then
-  begin
-    Result := True;
-    Exit;
-  end;
-
-  errorEnum := nil;
-
-  hr := checker.Check(pwidechar(Text), errorEnum);
-  if Failed(hr) or (errorEnum = nil) then
-    Exit;
-
-  SetLength(Errors, errorCount);
-
-  errorIndex := 0;
-
-  while (errorIndex < errorCount) and (errorEnum.Next(errorItem) = S_OK) do
-  begin
-    if errorItem = nil then
-      Continue;
+    SetLength(tempErrors, Length(tempErrors) + 1);
+    currentIndex := High(tempErrors);
 
     hr := errorItem.GetStartIndex(startIdx);
     if Failed(hr) then
+    begin
+      SetLength(tempErrors, Length(tempErrors) - 1);
+      errorItem := nil;
       Continue;
+    end;
 
     hr := errorItem.GetLength(errLen);
     if Failed(hr) then
+    begin
+      SetLength(tempErrors, Length(tempErrors) - 1);
+      errorItem := nil;
       Continue;
+    end;
 
-    Errors[errorIndex].Start := startIdx;
-    Errors[errorIndex].Length := errLen;
-    SetLength(Errors[errorIndex].Suggestions, 0);
+    tempErrors[currentIndex].Start := startIdx;
+    tempErrors[currentIndex].Length := errLen;
+    tempErrors[currentIndex].ErrorType := setSpelling; // default, will be overwritten later
+    SetLength(tempErrors[currentIndex].Suggestions, 0);
 
     if errLen > 0 then
     begin
@@ -223,16 +198,15 @@ begin
       begin
         while suggEnum.Next(1, sugg, fetched) = S_OK do
         begin
-          if fetched = 0 then
-            Break;
+          if fetched = 0 then Break;
 
           SetLength(
-            Errors[errorIndex].Suggestions,
-            Length(Errors[errorIndex].Suggestions) + 1
+            tempErrors[currentIndex].Suggestions,
+            Length(tempErrors[currentIndex].Suggestions) + 1
             );
 
-          Errors[errorIndex].Suggestions[
-            High(Errors[errorIndex].Suggestions)
+          tempErrors[currentIndex].Suggestions[
+            High(tempErrors[currentIndex].Suggestions)
             ] := sugg;
 
           CoTaskMemFree(sugg);
@@ -244,11 +218,127 @@ begin
     end;
 
     errorItem := nil;
-    Inc(errorIndex);
   end;
 
-  SetLength(Errors, errorIndex);
+  ErrorArray := tempErrors;
+end;
+
+function IsSameError(const E1, E2: TSpellError): boolean;
+begin
+  Result := (E1.Start = E2.Start) and (E1.Length = E2.Length);
+end;
+
+function CheckSpellingInternal(const Text: widestring; const LanguageTag: string; out Errors: TSpellErrorArray; Options: TSpellCheckOptions): boolean;
+var
+  factory: ISpellCheckerFactory = nil;
+  checker: ISpellChecker = nil;
+  spellingEnum: IEnumSpellingError = nil;
+  comprehensiveEnum: IEnumSpellingError = nil;
+  spellingErrors: TSpellErrorArray = nil;
+  allErrors: TSpellErrorArray = nil;
+  finalErrors: TSpellErrorArray = nil;
+  i, j: integer;
+  found: boolean;
+  NormalizedTag: widestring = '';
+  hr: HRESULT;
+begin
+  Result := False;
+  Errors := nil;
+
+  if Text = '' then Exit;
+  if Options = [] then Exit;
+
+  NormalizedTag := NormalizeLanguageTag(LanguageTag);
+  if NormalizedTag = '' then Exit;
+  if not IsLanguageSupported(NormalizedTag) then Exit;
+
+  hr := CoCreateInstance(CLSID_SpellCheckerFactory, nil, CLSCTX_INPROC_SERVER, ISpellCheckerFactory, factory);
+  if Failed(hr) then Exit;
+
+  hr := factory.CreateSpellChecker(pwidechar(NormalizedTag), checker);
+  if Failed(hr) then Exit;
+
+  // Always get spelling errors (needed for both spelling and grammar filtering)
+  hr := checker.Check(pwidechar(Text), spellingEnum);
+  if Failed(hr) or (spellingEnum = nil) then Exit;
+  ExtractErrorsFromEnum(Text, checker, spellingEnum, spellingErrors);
+  spellingEnum := nil;
+
+  // If grammar is requested, get comprehensive errors
+  if scoGrammar in Options then
+  begin
+    hr := checker.ComprehensiveCheck(pwidechar(Text), comprehensiveEnum);
+    if Failed(hr) or (comprehensiveEnum = nil) then Exit;
+    ExtractErrorsFromEnum(Text, checker, comprehensiveEnum, allErrors);
+    comprehensiveEnum := nil;
+  end;
+
+  // Build final error list based on options
+  if (scoSpelling in Options) and (scoGrammar in Options) then
+  begin
+    SetLength(finalErrors, Length(allErrors));
+    for i := 0 to High(allErrors) do
+    begin
+      finalErrors[i] := allErrors[i];
+      found := False;
+      for j := 0 to High(spellingErrors) do
+      begin
+        if IsSameError(allErrors[i], spellingErrors[j]) then
+        begin
+          found := True;
+          Break;
+        end;
+      end;
+      if found then
+        finalErrors[i].ErrorType := setSpelling
+      else
+        finalErrors[i].ErrorType := setGrammar; // heuristic: not in spelling => grammar
+    end;
+  end
+  else if scoSpelling in Options then
+  begin
+    SetLength(finalErrors, Length(spellingErrors));
+    for i := 0 to High(spellingErrors) do
+    begin
+      finalErrors[i] := spellingErrors[i];
+      finalErrors[i].ErrorType := setSpelling;
+    end;
+  end
+  else if scoGrammar in Options then
+  begin
+    SetLength(finalErrors, 0);
+    for i := 0 to High(allErrors) do
+    begin
+      found := False;
+      for j := 0 to High(spellingErrors) do
+      begin
+        if IsSameError(allErrors[i], spellingErrors[j]) then
+        begin
+          found := True;
+          Break;
+        end;
+      end;
+      if not found then
+      begin
+        SetLength(finalErrors, Length(finalErrors) + 1);
+        finalErrors[High(finalErrors)] := allErrors[i];
+        finalErrors[High(finalErrors)].ErrorType := setGrammar;
+      end;
+    end;
+  end;
+
+  Errors := finalErrors;
   Result := True;
+end;
+
+function CheckSpelling(const Text: widestring; const LanguageTag: string; out Errors: TSpellErrorArray): boolean;
+begin
+  Result := CheckSpellingInternal(Text, LanguageTag, Errors, [scoSpelling]);
+end;
+
+function CheckSpelling(const Text: widestring; const LanguageTag: string; out Errors: TSpellErrorArray; Options: TSpellCheckOptions): boolean;
+begin
+  Result := CheckSpellingInternal(Text, LanguageTag, Errors, Options);
 end;
 
 function NormalizeLanguageTag(const Input: string): widestring;
