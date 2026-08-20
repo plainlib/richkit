@@ -18,7 +18,7 @@ type
   public
     // Checks the text of a RichMemo for spelling and/or grammar errors and applies wavy underlines
     class procedure CheckWinApi(ARichMemo: TRichMemo; ASpellChecker: TRichSpellChecker; const ALanguage: string;
-      AOptions: TSpellCheckOptions); static;
+      AOptions: TSpellCheckOptions; AAddEmptySuggestions: boolean = False); static;
 
     // Returns a list of all available spell checker language tags in BCP-47 format
     class function GetSupportedLanguages: TStrings; static;
@@ -27,7 +27,7 @@ type
 implementation
 
 class procedure TSpell.CheckWinApi(ARichMemo: TRichMemo; ASpellChecker: TRichSpellChecker; const ALanguage: string;
-  AOptions: TSpellCheckOptions);
+  AOptions: TSpellCheckOptions; AAddEmptySuggestions: boolean = False);
 {$IFDEF WINDOWS}
 var
   WideText: widestring;
@@ -85,10 +85,13 @@ begin
         SuggestionList[j] := UTF8Encode(Errors[i].Suggestions[j]);
 
       // Add the error using UTF-8 character positions
-    if Errors[i].ErrorType = setGrammar then
-      ASpellChecker.AddError(StartPos, ErrorLength, 'Grammar error', SuggestionList, clGreen)
-    else
-      ASpellChecker.AddError(StartPos, ErrorLength, 'Spelling error', SuggestionList, clRed);
+      if AAddEmptySuggestions or (Length(SuggestionList)>0) then
+      begin
+        if Errors[i].ErrorType = setComprehensiveSpelling then
+          ASpellChecker.AddError(StartPos, ErrorLength, 'Comprehensive Spelling error', SuggestionList, clFuchsia)
+        else
+          ASpellChecker.AddError(StartPos, ErrorLength, 'Spelling error', SuggestionList, clRed);
+      end;
     end;
   finally
     ASpellChecker.EndUpdate;

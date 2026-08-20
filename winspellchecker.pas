@@ -18,7 +18,7 @@ uses
 
 type
   // Note: ErrorType is determined heuristically and may not be 100% reliable
-  TSpellErrorType = (setSpelling, setGrammar);
+  TSpellErrorType = (setSpelling, setComprehensiveSpelling);
 
   TSpellError = record
     Start: integer;
@@ -31,7 +31,7 @@ type
 
   TSupportedLanguages = array of widestring;
 
-  TSpellCheckOption = (scoSpelling, scoGrammar);
+  TSpellCheckOption = (scoSpelling, scoComprehensiveSpelling);
   TSpellCheckOptions = set of TSpellCheckOption;
 
   IEnumString = interface(IUnknown)
@@ -93,7 +93,7 @@ function Utf16ToUtf8CharIndex(const Utf8Str: string; Utf16Index: integer): integ
 // Checks spelling only (uses default options [scoSpelling])
 function CheckSpelling(const Text: widestring; const LanguageTag: string; out Errors: TSpellErrorArray): boolean;
 
-// Checks spelling and/or grammar based on Options
+// Checks spelling and/or comprehensive spelling based on Options
 function CheckSpelling(const Text: widestring; const LanguageTag: string; out Errors: TSpellErrorArray; Options: TSpellCheckOptions): boolean; overload;
 
 // Normalize a language tag to BCP-47 format (e.g., "ru" -> "ru-RU", "ru-ru" -> "ru-RU")
@@ -258,14 +258,14 @@ begin
   hr := factory.CreateSpellChecker(pwidechar(NormalizedTag), checker);
   if Failed(hr) then Exit;
 
-  // Always get spelling errors (needed for both spelling and grammar filtering)
+  // Always get spelling errors (needed for both spelling and comprehensive spelling filtering)
   hr := checker.Check(pwidechar(Text), spellingEnum);
   if Failed(hr) or (spellingEnum = nil) then Exit;
   ExtractErrorsFromEnum(Text, checker, spellingEnum, spellingErrors);
   spellingEnum := nil;
 
-  // If grammar is requested, get comprehensive errors
-  if scoGrammar in Options then
+  // If comprehensive spelling is requested, get comprehensive errors
+  if scoComprehensiveSpelling in Options then
   begin
     hr := checker.ComprehensiveCheck(pwidechar(Text), comprehensiveEnum);
     if Failed(hr) or (comprehensiveEnum = nil) then Exit;
@@ -274,7 +274,7 @@ begin
   end;
 
   // Build final error list based on options
-  if (scoSpelling in Options) and (scoGrammar in Options) then
+  if (scoSpelling in Options) and (scoComprehensiveSpelling in Options) then
   begin
     SetLength(finalErrors, Length(allErrors));
     for i := 0 to High(allErrors) do
@@ -289,10 +289,11 @@ begin
           Break;
         end;
       end;
+      // Errors found only by ComprehensiveCheck are classified separately.
       if found then
         finalErrors[i].ErrorType := setSpelling
       else
-        finalErrors[i].ErrorType := setGrammar; // heuristic: not in spelling => grammar
+        finalErrors[i].ErrorType := setComprehensiveSpelling; // heuristic: not in spelling => comprehensive spelling
     end;
   end
   else if scoSpelling in Options then
@@ -304,7 +305,7 @@ begin
       finalErrors[i].ErrorType := setSpelling;
     end;
   end
-  else if scoGrammar in Options then
+  else if scoComprehensiveSpelling in Options then
   begin
     SetLength(finalErrors, 0);
     for i := 0 to High(allErrors) do
@@ -322,7 +323,7 @@ begin
       begin
         SetLength(finalErrors, Length(finalErrors) + 1);
         finalErrors[High(finalErrors)] := allErrors[i];
-        finalErrors[High(finalErrors)].ErrorType := setGrammar;
+        finalErrors[High(finalErrors)].ErrorType := setComprehensiveSpelling;
       end;
     end;
   end;
