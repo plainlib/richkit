@@ -51,6 +51,9 @@ type
     // Inserts clipboard text, normalizing all line endings to LineEnding.
     procedure PasteWithLineEnding;
 
+    // Set text bidi mode
+    procedure ApplyBidiMode;
+
     // Returns the free space below the text in the memo's client area.
     function GetBottomSpace: integer;
 
@@ -408,6 +411,128 @@ begin
 
     Self.SelText := s;
   end;
+end;
+
+procedure TRichMemoHelper.ApplyBidiMode;
+{$IFDEF WINDOWS}
+type
+  // PARAFORMAT2 structure Windows API.
+  TParaFormat2 = record
+    cbSize: UINT;
+    dwMask: DWORD;
+    wNumbering: WORD;
+    wEffects: WORD;
+    dxStartIndent: Longint;
+    dxRightIndent: Longint;
+    dxOffset: Longint;
+    wAlignment: WORD;
+    cTabCount: Smallint;
+    rgxTabs: array[0..31] of Longint;
+    dySpaceBefore: Longint;
+    dySpaceAfter: Longint;
+    dyLineSpacing: Longint;
+    sStyle: Smallint;
+    bLineSpacingRule: Byte;
+    bOutlineLevel: Byte;
+    wShadingWeight: WORD;
+    wShadingStyle: WORD;
+    wNumberingStart: WORD;
+    wNumberingStyle: WORD;
+    wNumberingTab: WORD;
+    wBorderSpace: WORD;
+    wBorderWidth: WORD;
+    wBorders: WORD;
+  end;
+
+  TCharRange = record
+    cpMin: Longint;
+    cpMax: Longint;
+  end;
+
+const
+  EM_EXSETSEL = WM_USER + 55;
+  EM_SETPARAFORMAT = WM_USER + 71;
+  EM_GETSCROLLPOS = WM_USER + 221;
+  EM_SETSCROLLPOS = WM_USER + 222;
+
+  PFM_RTLPARA = $00010000;
+  PFE_RTLPARA = $00000001;
+
+var
+  PF: TParaFormat2;
+  CR: TCharRange;
+  SavedSelStart: Integer;
+  SavedSelLength: Integer;
+  ScrollPos: TPoint;
+  DesiredRTL: Boolean;
+{$ENDIF}
+begin
+  {$IFDEF WINDOWS}
+
+  DesiredRTL := Self.BidiMode in
+    [bdRightToLeft, bdRightToLeftReadingOnly];
+
+  // Save current selection.
+  SavedSelStart := Self.SelStart;
+  SavedSelLength := Self.SelLength;
+
+  // Save scroll position.
+  ScrollPos := Default(TPoint);
+
+  {$HINTS OFF}
+  SendMessage(Handle, EM_GETSCROLLPOS, 0, LPARAM(@ScrollPos));
+  {$HINTS ON}
+
+  PF := Default(TParaFormat2);
+  PF.cbSize := SizeOf(PF);
+  PF.dwMask := PFM_RTLPARA;
+
+  if DesiredRTL then
+    PF.wEffects := PFE_RTLPARA;
+
+  // Prevent repainting while changing the selection and paragraph format.
+  {$HINTS OFF}
+  SendMessage(Handle, WM_SETREDRAW, WPARAM(False), 0);
+  {$HINTS ON}
+
+  try
+    // Select the entire document.
+    CR.cpMin := 0;
+    CR.cpMax := Self.GetTextLen;
+
+    {$HINTS OFF}
+    SendMessage(Handle, EM_EXSETSEL, 0, LPARAM(@CR));
+    {$HINTS ON}
+
+    // Apply RTL/LTR paragraph direction.
+    {$HINTS OFF}
+    SendMessage(Handle, EM_SETPARAFORMAT, 0, LPARAM(@PF));
+    {$HINTS ON}
+
+    // Restore original selection.
+    CR.cpMin := SavedSelStart;
+    CR.cpMax := SavedSelStart + SavedSelLength;
+
+    {$HINTS OFF}
+    SendMessage(Handle, EM_EXSETSEL, 0, LPARAM(@CR));
+
+    // Restore scroll position.
+    SendMessage(Handle, EM_SETSCROLLPOS, 0, LPARAM(@ScrollPos));
+
+    // Re-enable repainting.
+    SendMessage(Handle, WM_SETREDRAW, WPARAM(True), 0);
+    {$HINTS ON}
+  finally
+    // Make sure redraw is always enabled.
+    {$HINTS OFF}
+    SendMessage(Handle, WM_SETREDRAW, WPARAM(True), 0);
+    {$HINTS ON}
+  end;
+
+  // Let Windows repaint normally without forcing immediate redraw.
+  InvalidateRect(Handle, nil, False);
+
+  {$ENDIF}
 end;
 
 function TRichMemoHelper.GetBottomSpace: integer;
