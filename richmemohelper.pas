@@ -23,6 +23,7 @@ uses
   ActiveX,
   {$ENDIF}
   LCLType,
+  LCLIntf,
   LazUtf8,
   RichMemo,
   RichMemoHelpers;

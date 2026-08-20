@@ -12,10 +12,15 @@ unit WinSpellChecker;
 interface
 
 {$IFDEF WINDOWS}
-
 uses
-  Classes, SysUtils, ActiveX, ComObj, LazUTF8;
+Classes, SysUtils, ActiveX, ComObj, LazUTF8;
+{$ENDIF}
 
+type
+  TSpellCheckOption = (scoSpelling, scoComprehensiveSpelling);
+  TSpellCheckOptions = set of TSpellCheckOption;
+
+  {$IFDEF WINDOWS}
 type
   // Note: ErrorType is determined heuristically and may not be 100% reliable
   TSpellErrorType = (setSpelling, setComprehensiveSpelling);
@@ -31,8 +36,6 @@ type
 
   TSupportedLanguages = array of widestring;
 
-  TSpellCheckOption = (scoSpelling, scoComprehensiveSpelling);
-  TSpellCheckOptions = set of TSpellCheckOption;
 
   IEnumString = interface(IUnknown)
     ['{00000101-0000-0000-C000-000000000046}']
@@ -105,7 +108,7 @@ function IsLanguageSupported(const LanguageTag: widestring): boolean;
 // Returns a list of all available spell checker language tags in BCP-47 format
 function GetSupportedSpellCheckerLanguages: TSupportedLanguages;
 
-{$ENDIF}
+  {$ENDIF}
 
 implementation
 
