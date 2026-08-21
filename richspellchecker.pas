@@ -19,6 +19,9 @@ uses
   RichMemo;
 
 type
+  TSpellCheckOption = (scoSpelling, scoComprehensiveSpelling);
+  TSpellCheckOptions = set of TSpellCheckOption;
+
   TSpellError = record
     Offset: integer;
     Length: integer;

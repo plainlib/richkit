@@ -13,14 +13,8 @@ interface
 
 {$IFDEF WINDOWS}
 uses
-Classes, SysUtils, ActiveX, ComObj, LazUTF8;
-{$ENDIF}
+Classes, SysUtils, ActiveX, ComObj, LazUTF8, RichSpellChecker;
 
-type
-  TSpellCheckOption = (scoSpelling, scoComprehensiveSpelling);
-  TSpellCheckOptions = set of TSpellCheckOption;
-
-  {$IFDEF WINDOWS}
 type
   // Note: ErrorType is determined heuristically and may not be 100% reliable
   TSpellErrorType = (setSpelling, setComprehensiveSpelling);
@@ -108,7 +102,7 @@ function IsLanguageSupported(const LanguageTag: widestring): boolean;
 // Returns a list of all available spell checker language tags in BCP-47 format
 function GetSupportedSpellCheckerLanguages: TSupportedLanguages;
 
-  {$ENDIF}
+{$ENDIF}
 
 implementation
 
