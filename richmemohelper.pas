@@ -65,6 +65,9 @@ type
 
     // Disable built-in OLE drag-and-drop (text dragging within RichMemo and receiving from outside)
     procedure DisableBuiltInDragDrop;
+
+    // Sets the left indent (in pixels) for all paragraphs in the document.
+    procedure SetLeftIndent(AIndentPixels: integer);
   end;
 
 implementation
@@ -696,6 +699,129 @@ begin
 
   // Revoke any existing OLE drop target (cheap operation).
   RevokeDragDrop(Handle);
+  {$ENDIF}
+end;
+
+procedure TRichMemoHelper.SetLeftIndent(AIndentPixels: integer);
+{$IFDEF WINDOWS}
+type
+  TParaFormat2 = record
+    cbSize: UINT;
+    dwMask: DWORD;
+    wNumbering: WORD;
+    wEffects: WORD;
+    dxStartIndent: Longint;
+    dxRightIndent: Longint;
+    dxOffset: Longint;
+    wAlignment: WORD;
+    cTabCount: Smallint;
+    rgxTabs: array[0..31] of Longint;
+    dySpaceBefore: Longint;
+    dySpaceAfter: Longint;
+    dyLineSpacing: Longint;
+    sStyle: Smallint;
+    bLineSpacingRule: Byte;
+    bOutlineLevel: Byte;
+    wShadingWeight: WORD;
+    wShadingStyle: WORD;
+    wNumberingStart: WORD;
+    wNumberingStyle: WORD;
+    wNumberingTab: WORD;
+    wBorderSpace: WORD;
+    wBorderWidth: WORD;
+    wBorders: WORD;
+  end;
+
+  TCharRange = record
+    cpMin: Longint;
+    cpMax: Longint;
+  end;
+
+const
+  EM_EXSETSEL = WM_USER + 55;
+  EM_SETPARAFORMAT = WM_USER + 71;
+  EM_GETSCROLLPOS = WM_USER + 221;
+  EM_SETSCROLLPOS = WM_USER + 222;
+  PFM_STARTINDENT = $00000001;
+
+var
+  PF: TParaFormat2;
+  CR: TCharRange;
+  SavedSelStart: Integer;
+  SavedSelLength: Integer;
+  ScrollPos: TPoint;
+  IndentTwips: Integer;
+  DC: HDC;
+{$ENDIF}
+begin
+  {$IFDEF WINDOWS}
+  if AIndentPixels < 0 then
+    AIndentPixels := 0;
+
+  // Convert pixels to twips using screen DPI.
+  DC := GetDC(0);
+  try
+    IndentTwips := MulDiv(AIndentPixels, 1440, GetDeviceCaps(DC, LOGPIXELSX));
+  finally
+    ReleaseDC(0, DC);
+  end;
+
+  // Save current selection.
+  SavedSelStart := Self.SelStart;
+  SavedSelLength := Self.SelLength;
+
+  // Save scroll position.
+  ScrollPos := Default(TPoint);
+  {$HINTS OFF}
+  SendMessage(Handle, EM_GETSCROLLPOS, 0, LPARAM(@ScrollPos));
+  {$HINTS ON}
+
+  PF := Default(TParaFormat2);
+  PF.cbSize := SizeOf(PF);
+  PF.dwMask := PFM_STARTINDENT;
+  PF.dxStartIndent := IndentTwips;
+
+  // Prevent repainting while changing the selection and paragraph format.
+  {$HINTS OFF}
+  SendMessage(Handle, WM_SETREDRAW, WPARAM(False), 0);
+  {$HINTS ON}
+
+  try
+    // Select the entire document.
+    CR.cpMin := 0;
+    CR.cpMax := Self.GetTextLen;
+
+    {$HINTS OFF}
+    SendMessage(Handle, EM_EXSETSEL, 0, LPARAM(@CR));
+    {$HINTS ON}
+
+    // Apply left indent to all paragraphs.
+    {$HINTS OFF}
+    SendMessage(Handle, EM_SETPARAFORMAT, 0, LPARAM(@PF));
+    {$HINTS ON}
+
+    // Restore original selection.
+    CR.cpMin := SavedSelStart;
+    CR.cpMax := SavedSelStart + SavedSelLength;
+
+    {$HINTS OFF}
+    SendMessage(Handle, EM_EXSETSEL, 0, LPARAM(@CR));
+
+    // Restore scroll position.
+    SendMessage(Handle, EM_SETSCROLLPOS, 0, LPARAM(@ScrollPos));
+
+    // Re-enable repainting.
+    SendMessage(Handle, WM_SETREDRAW, WPARAM(True), 0);
+    {$HINTS ON}
+  finally
+    // Make sure redraw is always enabled.
+    {$HINTS OFF}
+    SendMessage(Handle, WM_SETREDRAW, WPARAM(True), 0);
+    {$HINTS ON}
+  end;
+
+  // Let Windows repaint normally without forcing immediate redraw.
+  InvalidateRect(Handle, nil, False);
   {$ENDIF}
 end;
 
