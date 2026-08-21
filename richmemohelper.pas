@@ -564,7 +564,7 @@ begin
     // Width for calculation: ClientWidth minus a small inner margin (optional)
     // With WordWrap, width is limited to ClientWidth, otherwise use a very large width
     if Self.WordWrap then
-      TextRect := Types.Rect(0, 0, Self.ClientWidth - 4, 0)
+      TextRect := Types.Rect(0, 0, Round((Self.ClientWidth - 4) / Self.ZoomFactor), 0)
     else
       TextRect := Types.Rect(0, 0, 32767, 0);  // large enough to avoid wrapping
 
@@ -577,7 +577,7 @@ begin
       );
 
     // Free space = visible height – actual text height
-    Result := Self.ClientHeight - (TextRect.Bottom - TextRect.Top);
+    Result := Round(Self.ClientHeight - (TextRect.Bottom - TextRect.Top) * Self.ZoomFactor);
     if Result < 0 then
       Result := 0;
   finally
