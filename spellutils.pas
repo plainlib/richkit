@@ -17,8 +17,8 @@ type
   TSpell = class
   public
     // Checks the text of a RichMemo for spelling and/or grammar errors and applies wavy underlines
-    class procedure WinCheck(ARichMemo: TRichMemo; ASpellChecker: TRichSpellChecker; const ALanguage: string;
-      AOptions: TSpellCheckOptions; AAddEmptySuggestions: boolean = False); static;
+    class function WinCheck(ARichMemo: TRichMemo; ASpellChecker: TRichSpellChecker; const ALanguage: string;
+      AOptions: TSpellCheckOptions = [scoSpelling]; AAddEmptySuggestions: boolean = False): boolean; static;
 
     // Returns a list of all available spell checker language tags in BCP-47 format
     class function WinSupportedLanguages: TStrings; static;
@@ -26,9 +26,9 @@ type
 
 implementation
 
-class procedure TSpell.WinCheck(ARichMemo: TRichMemo; ASpellChecker: TRichSpellChecker; const ALanguage: string;
-  AOptions: TSpellCheckOptions; AAddEmptySuggestions: boolean = False);
-{$IFDEF WINDOWS}
+class function TSpell.WinCheck(ARichMemo: TRichMemo; ASpellChecker: TRichSpellChecker; const ALanguage: string;
+  AOptions: TSpellCheckOptions = [scoSpelling]; AAddEmptySuggestions: boolean = False): boolean;
+  {$IFDEF WINDOWS}
 var
   WideText: widestring;
   Utf8Text: string;
@@ -36,8 +36,9 @@ var
   SuggestionList: array of string = nil;
   i, j: integer;
   StartPos, EndPos, ErrorLength: integer;
-{$ENDIF}
+  {$ENDIF}
 begin
+  Result := False;
   {$IFDEF WINDOWS}
   if not Assigned(ARichMemo) or not Assigned(ASpellChecker) then
     Exit;
@@ -93,6 +94,7 @@ begin
           ASpellChecker.AddError(StartPos, ErrorLength, 'Spelling error', SuggestionList, clRed);
       end;
     end;
+    Result := True;
   finally
     ASpellChecker.EndUpdate;
   end;

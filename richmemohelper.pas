@@ -67,7 +67,7 @@ type
     procedure DisableBuiltInDragDrop;
 
     // Sets the left indent (in pixels) for all paragraphs in the document.
-    procedure SetLeftIndent(AIndentPixels: integer);
+    procedure SetLeftIndent(AIndentPixels: integer = 3);
   end;
 
 implementation
@@ -702,7 +702,7 @@ begin
   {$ENDIF}
 end;
 
-procedure TRichMemoHelper.SetLeftIndent(AIndentPixels: integer);
+procedure TRichMemoHelper.SetLeftIndent(AIndentPixels: integer = 3);
 {$IFDEF WINDOWS}
 type
   TParaFormat2 = record

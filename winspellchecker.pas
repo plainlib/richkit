@@ -114,6 +114,10 @@ implementation
 
 {$IFDEF WINDOWS}
 
+var
+  SpellCheckerLanguagesCache: TSupportedLanguages = nil;
+  SpellCheckerLanguagesCached: boolean = False;
+
 function Utf16IndexToUtf8Byte(const Utf8Str: string; Utf16Index: integer): integer;
 var
   WideStr: widestring = '';
@@ -345,10 +349,57 @@ begin
   Result := CheckSpellingInternal(Text, LanguageTag, Errors, Options);
 end;
 
+// Returns the preferred BCP-47 tag for a short language code,
+// used when the generic xx-XX form is not the most common variant.
+function GetPreferredLanguageTag(const ShortCode: string): string;
+begin
+  Result := '';
+  case LowerCase(ShortCode) of
+    'en': Result := 'en-US';
+    'pt': Result := 'pt-BR';
+    'zh': Result := 'zh-CN';
+    'ar': Result := 'ar-SA';
+    'he': Result := 'he-IL';
+    'el': Result := 'el-GR';
+    'ja': Result := 'ja-JP';
+    'ko': Result := 'ko-KR';
+    'hi': Result := 'hi-IN';
+    'vi': Result := 'vi-VN';
+    'uk': Result := 'uk-UA';
+    'cs': Result := 'cs-CZ';
+    'da': Result := 'da-DK';
+    'fi': Result := 'fi-FI';
+    'nb': Result := 'nb-NO';
+    'no': Result := 'nb-NO'; // map deprecated 'no' to Norwegian Bokmål
+    'fa': Result := 'fa-IR';
+    'ms': Result := 'ms-MY';
+    'bn': Result := 'bn-BD';
+    'ta': Result := 'ta-IN';
+    'te': Result := 'te-IN';
+    'mr': Result := 'mr-IN';
+    'sw': Result := 'sw-TZ'; // or sw-KE depending on your preference
+    'km': Result := 'km-KH';
+    'lo': Result := 'lo-LA';
+    'ne': Result := 'ne-NP';
+    'si': Result := 'si-LK';
+    'ka': Result := 'ka-GE';
+    'hy': Result := 'hy-AM';
+    'kk': Result := 'kk-KZ';
+    'az': Result := 'az-Latn-AZ';
+    'sq': Result := 'sq-AL';
+  end;
+end;
+
 function NormalizeLanguageTag(const Input: string): widestring;
 var
-  Part1, Part2: string;
-  dashPos: integer;
+  Part1: string = '';
+  Part2: string = '';
+  dashPos: integer = 0;
+  Candidate: string = '';
+  Langs: TSupportedLanguages = nil;
+  i: integer = 0;
+  Prefix: string = '';
+  PreferredTag: string = '';
 begin
   Result := '';
   if Input = '' then Exit;
@@ -356,34 +407,51 @@ begin
   dashPos := Pos('-', Input);
   if dashPos = 0 then
   begin
-    // No dash, assume short code like "ru"
+    // No dash, assume short code like "en"
     if Length(Input) = 2 then
-      Result := WideString(LowerCase(Input) + '-' + UpperCase(Input))
+    begin
+      // Try the constructed tag xx-XX first
+      Candidate := LowerCase(Input) + '-' + UpperCase(Input);
+      if IsLanguageSupported(WideString(Candidate)) then
+      begin
+        Result := WideString(Candidate);
+        Exit;
+      end;
+
+      // Then try the preferred tag from the manual list
+      PreferredTag := GetPreferredLanguageTag(Input);
+      if (PreferredTag <> '') and IsLanguageSupported(WideString(PreferredTag)) then
+      begin
+        Result := WideString(PreferredTag);
+        Exit;
+      end;
+
+      // If neither works, find the first available language with the same prefix
+      Langs := GetSupportedSpellCheckerLanguages;
+      Prefix := LowerCase(Input) + '-';
+      for i := 0 to High(Langs) do
+      begin
+        if Pos(Prefix, LowerCase(string(Langs[i]))) = 1 then
+        begin
+          Result := Langs[i];
+          Break;
+        end;
+      end;
+
+      // Last resort: return the constructed tag even if not supported
+      if Result = '' then
+        Result := WideString(Candidate);
+    end
     else
       Result := WideString(Input);
   end
   else
   begin
+    // Already has a dash, just normalize case
     Part1 := Copy(Input, 1, dashPos - 1);
     Part2 := Copy(Input, dashPos + 1, Length(Input) - dashPos);
     Result := WideString(LowerCase(Part1) + '-' + UpperCase(Part2));
   end;
-end;
-
-function IsLanguageSupported(const LanguageTag: widestring): boolean;
-var
-  factory: ISpellCheckerFactory = nil;
-  supported: longbool = False;
-  hr: HRESULT = S_OK;
-begin
-  Result := False;
-
-  hr := CoCreateInstance(CLSID_SpellCheckerFactory, nil, CLSCTX_INPROC_SERVER, ISpellCheckerFactory, factory);
-  if Failed(hr) then Exit;
-
-  hr := factory.IsSupported(pwidechar(LanguageTag), supported);
-  if Succeeded(hr) and supported then
-    Result := True;
 end;
 
 function GetSupportedSpellCheckerLanguages: TSupportedLanguages;
@@ -395,6 +463,9 @@ var
   hr: HRESULT;
   langList: TSupportedLanguages = nil;
 begin
+  if SpellCheckerLanguagesCached then
+    Exit(SpellCheckerLanguagesCache);
+
   Result := nil;
 
   hr := CoCreateInstance(CLSID_SpellCheckerFactory, nil, CLSCTX_INPROC_SERVER, ISpellCheckerFactory, factory);
@@ -414,7 +485,29 @@ begin
     lang := nil;
   end;
 
-  Result := langList;
+  SpellCheckerLanguagesCache := langList;
+  SpellCheckerLanguagesCached := True;
+  Result := SpellCheckerLanguagesCache;
+end;
+
+function IsLanguageSupported(const LanguageTag: widestring): boolean;
+var
+  Langs: TSupportedLanguages = nil;
+  i: integer = 0;
+begin
+  Result := False;
+  if LanguageTag = '' then Exit;
+
+  // Use cached list of supported languages to avoid repeated COM calls
+  Langs := GetSupportedSpellCheckerLanguages;
+  for i := 0 to High(Langs) do
+  begin
+    if WideCompareText(Langs[i], LanguageTag) = 0 then
+    begin
+      Result := True;
+      Exit;
+    end;
+  end;
 end;
 
 {$ENDIF}

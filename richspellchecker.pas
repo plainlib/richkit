@@ -53,7 +53,7 @@ type
     procedure EndUpdate;
     procedure AddError(AOffset, ALength: integer; const AMessage: string; const AReplacements: array of string; AColor: TColor = clRed);
     procedure ApplyUnderlines;
-    procedure ShowContextMenu(X, Y: integer);
+    function ShowContextMenu(X, Y: integer): boolean;
     procedure ReplaceError(AError: PSpellError; const ANewText: string; NewCaretPos: integer = -1);
     // Remove a single error from the list and clear its underline
     procedure RemoveError(AError: PSpellError; ANewLength: integer);
@@ -517,7 +517,7 @@ begin
   {$ENDIF}
 end;
 
-procedure TRichSpellChecker.ShowContextMenu(X, Y: integer);
+function TRichSpellChecker.ShowContextMenu(X, Y: integer): boolean;
 var
   CharIndex: integer;
   Error: PSpellError;
@@ -525,6 +525,7 @@ var
   i: integer;
   ScreenPoint: TPoint;
 begin
+  Result := False;
   if not Assigned(FRichMemo) then
     Exit;
 
@@ -557,6 +558,7 @@ begin
     // Convert client coordinates to screen coordinates for Popup
     ScreenPoint := FRichMemo.ClientToScreen(Types.Point(X, Y));
     FMenu.Popup(ScreenPoint.X, ScreenPoint.Y);
+    Result := True;
   end;
 end;
 
