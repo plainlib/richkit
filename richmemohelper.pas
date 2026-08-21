@@ -68,12 +68,63 @@ type
 
     // Sets the left indent (in pixels) for all paragraphs in the document.
     procedure SetLeftIndent(AIndentPixels: integer = 3);
+
+    // Disable Composited mode while scrolling Memo
+    procedure EnableScrollbarFix(AParentPanel: TWinControl);
   end;
 
 implementation
 
 uses
   HtmlToRtf, RtfToHtml, ClipToHtml, clipboardhelper, stringhelper, controlshelper;
+
+{$IFDEF WINDOWS}
+function RichMemoScrollWndProc(Handle: HWND; Msg: UINT; wParam: WPARAM; lParam: LPARAM): LRESULT; stdcall;
+var
+  ParentPanel: TWinControl;
+  OldProc: LONG_PTR;
+begin
+  case Msg of
+    WM_NCLBUTTONDOWN:
+      begin
+        // User pressed the vertical or horizontal scrollbar
+        if (wParam = HTVSCROLL) or (wParam = HTHSCROLL) then
+        begin
+          ParentPanel := TWinControl(Pointer(GetProp(Handle, 'ScrollFixParentPanel')));
+          if Assigned(ParentPanel) then
+            ParentPanel.SetComposited(False); // Disable compositing during scroll drag
+        end;
+      end;
+
+    WM_VSCROLL, WM_HSCROLL:
+      begin
+        // Call the original window procedure first
+        OldProc := LONG_PTR(GetProp(Handle, 'OldRichMemoWndProc'));
+        if OldProc <> 0 then
+          Result := CallWindowProc(WNDPROC(OldProc), Handle, Msg, wParam, lParam)
+        else
+          Result := DefWindowProc(Handle, Msg, wParam, lParam);
+
+        // If the scroll operation has ended, re-enable compositing
+        if (wParam = SB_ENDSCROLL) or (wParam = SB_THUMBPOSITION) then
+        begin
+          ParentPanel := TWinControl(Pointer(GetProp(Handle, 'ScrollFixParentPanel')));
+          if Assigned(ParentPanel) then
+            ParentPanel.SetComposited(True); // Restore compositing
+        end;
+
+        Exit; // We already processed the message
+      end;
+  end;
+
+  // Default: call the original procedure
+  OldProc := LONG_PTR(GetProp(Handle, 'OldRichMemoWndProc'));
+  if OldProc <> 0 then
+    Result := CallWindowProc(WNDPROC(OldProc), Handle, Msg, wParam, lParam)
+  else
+    Result := DefWindowProc(Handle, Msg, wParam, lParam);
+end;
+{$ENDIF}
 
 procedure TRichMemoHelper.InsertRtfAtCursor(const ARtf: string);
 var
@@ -824,5 +875,29 @@ begin
   InvalidateRect(Handle, nil, False);
   {$ENDIF}
 end;
+
+procedure TRichMemoHelper.EnableScrollbarFix(AParentPanel: TWinControl);
+{$IFDEF WINDOWS}
+var
+  WinCtrl: TWinControl;
+  OldProc: LONG_PTR;
+{$ENDIF}
+begin
+  {$IFDEF WINDOWS}
+  if not (Self is TWinControl) then Exit;
+  WinCtrl := TWinControl(Self);
+  WinCtrl.HandleNeeded;
+  if not WinCtrl.HandleAllocated then Exit;
+
+  // Save the original window procedure and store the parent panel
+  OldProc := GetWindowLongPtr(WinCtrl.Handle, GWL_WNDPROC);
+  SetProp(WinCtrl.Handle, 'OldRichMemoWndProc', Pointer(OldProc));
+  SetProp(WinCtrl.Handle, 'ScrollFixParentPanel', Pointer(AParentPanel));
+
+  // Replace the window procedure with our custom one
+  SetWindowLongPtr(WinCtrl.Handle, GWL_WNDPROC, LONG_PTR(@RichMemoScrollWndProc));
+  {$ENDIF}
+end;
+
 
 end.
