@@ -87,14 +87,22 @@ type
 implementation
 
 uses
-  HtmlToRtf, RtfToHtml, ClipToHtml, clipboardhelper, stringhelper, controlshelper;
+  HtmlToRtf,
+  {$IFDEF WINDOWS}
+  RtfToHtml,
+  clipboardhelper,
+  {$ENDIF}
+  ClipToHtml,
+  stringhelper,
+  controlshelper;
+
+{$IFDEF WINDOWS}
 
 const
   tomSuspend = -9999995; // tomSuspend constant
   tomResume = -9999994; // tomResume constant
   EM_GETOLEINTERFACE = WM_USER + 60; // added
 
-{$IFDEF WINDOWS}
 function RichMemoScrollWndProc(Handle: HWND; Msg: UINT; wParam: WPARAM; lParam: LPARAM): LRESULT; stdcall;
 var
   ParentPanel: TWinControl;
@@ -1015,6 +1023,5 @@ begin
   {$HINTS ON}
   {$ENDIF}
 end;
-
 
 end.

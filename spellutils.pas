@@ -11,7 +11,14 @@ unit SpellUtils;
 interface
 
 uses
-  Classes, SysUtils, Graphics, RichMemo, RichSpellChecker, WinSpellChecker;
+  Classes,
+  SysUtils,
+  Graphics,
+  RichMemo,
+  {$IFDEF WINDOWS}
+  WinSpellChecker,
+  {$ENDIF}
+  RichSpellChecker;
 
 type
   TSpell = class
@@ -39,7 +46,7 @@ class function TSpell.WinCheck(ARichMemo: TRichMemo; ASpellChecker: TRichSpellCh
 var
   WideText: widestring;
   Utf8Text: string;
-  WinErrors: TSpellErrorArray = nil;
+  WinErrors: WinSpellChecker.TSpellErrorArray = nil;
   SuggestionList: array of string = nil;
   i, j: integer;
   StartPos, EndPos, ErrorLength: integer;

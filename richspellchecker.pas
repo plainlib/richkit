@@ -13,11 +13,11 @@ interface
 uses
   Classes, SysUtils, Menus, Graphics, Types,
   {$IFDEF WINDOWS}
+  RichMemoHelper,
   {$ELSE}
   RichMemoHelpers,
   {$ENDIF}
-  RichMemo,
-  RichMemoHelper;
+  RichMemo;
 
 type
   TSpellCheckOption = (scoSpelling, scoComprehensiveSpelling);
