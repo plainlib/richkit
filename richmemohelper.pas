@@ -54,6 +54,9 @@ type
     // Set text bidi mode
     procedure ApplyBidiMode;
 
+    // Get full text height
+    function GetTextHeight: integer;
+
     // Returns the free space below the text in the memo's client area.
     function GetBottomSpace: integer;
 
@@ -63,11 +66,19 @@ type
     // Selects the token at APos, treating AExtraChars as part of word characters.
     procedure MemoTokenAtPos(APos: integer; const AExtraChars: unicodestring);
 
-    // Disable built-in OLE drag-and-drop (text dragging within RichMemo and receiving from outside)
-    procedure DisableBuiltInDragDrop;
+    // Temporarily suspend Undo recording to avoid formatting operations being undoable
+    // Suspend Undo recording
+    procedure SuspendUndo;
+
+    // Temporarily suspend Undo recording to avoid formatting operations being undoable
+    // Resume Undo recording
+    procedure ResumeUndo;
 
     // Sets the left indent (in pixels) for all paragraphs in the document.
     procedure SetLeftIndent(AIndentPixels: integer = 3);
+
+    // Disable built-in OLE drag-and-drop (text dragging within RichMemo and receiving from outside)
+    procedure DisableBuiltInDragDrop;
 
     // Disable Composited mode while scrolling Memo
     procedure EnableScrollbarFix(AParentPanel: TWinControl);
@@ -77,6 +88,11 @@ implementation
 
 uses
   HtmlToRtf, RtfToHtml, ClipToHtml, clipboardhelper, stringhelper, controlshelper;
+
+const
+  tomSuspend = -9999995; // tomSuspend constant
+  tomResume = -9999994; // tomResume constant
+  EM_GETOLEINTERFACE = WM_USER + 60; // added
 
 {$IFDEF WINDOWS}
 function RichMemoScrollWndProc(Handle: HWND; Msg: UINT; wParam: WPARAM; lParam: LPARAM): LRESULT; stdcall;
@@ -99,11 +115,13 @@ begin
     WM_VSCROLL, WM_HSCROLL:
       begin
         // Call the original window procedure first
+        {$HINTS OFF}
         OldProc := LONG_PTR(GetProp(Handle, 'OldRichMemoWndProc'));
         if OldProc <> 0 then
           Result := CallWindowProc(WNDPROC(OldProc), Handle, Msg, wParam, lParam)
         else
           Result := DefWindowProc(Handle, Msg, wParam, lParam);
+        {$HINTS ON}
 
         // If the scroll operation has ended, re-enable compositing
         if (wParam = SB_ENDSCROLL) or (wParam = SB_THUMBPOSITION) then
@@ -118,11 +136,13 @@ begin
   end;
 
   // Default: call the original procedure
+  {$HINTS OFF}
   OldProc := LONG_PTR(GetProp(Handle, 'OldRichMemoWndProc'));
   if OldProc <> 0 then
     Result := CallWindowProc(WNDPROC(OldProc), Handle, Msg, wParam, lParam)
   else
     Result := DefWindowProc(Handle, Msg, wParam, lParam);
+  {$HINTS ON}
 end;
 {$ENDIF}
 
@@ -589,22 +609,23 @@ begin
   {$ENDIF}
 end;
 
-function TRichMemoHelper.GetBottomSpace: integer;
+function TRichMemoHelper.GetTextHeight: integer;
 var
   Bmp: Graphics.TBitmap;
   TextRect: TRect;
   Txt: string;
   Flags: cardinal;
 begin
-  Txt := Self.Text;                     // or Self.Lines.Text
-  if Txt = '' then
-  begin
-    Result := Self.ClientHeight;        // entire client area is free
-    Exit;
-  end;
+  Txt := Self.Text;
 
-  // Base flags: calculate rectangle, edit control behaviour, no accelerators
+  if Txt = '' then
+    Exit(0);
+
+  if (Length(Txt) > 0) and (Txt[Length(Txt)] in [#10, #13]) then
+    Txt := Txt + ' ';
+
   Flags := DT_CALCRECT or DT_EDITCONTROL or DT_NOPREFIX;
+
   if Self.WordWrap then
     Flags := Flags or DT_WORDBREAK;
 
@@ -612,12 +633,13 @@ begin
   try
     Bmp.Canvas.Font.Assign(Self.Font);
 
-    // Width for calculation: ClientWidth minus a small inner margin (optional)
-    // With WordWrap, width is limited to ClientWidth, otherwise use a very large width
+    // Apply RichMemo zoom to the font
+    Bmp.Canvas.Font.Height := Round(Bmp.Canvas.Font.Height * Self.ZoomFactor);
+
     if Self.WordWrap then
-      TextRect := Types.Rect(0, 0, Round((Self.ClientWidth - 4) / Self.ZoomFactor), 0)
+      TextRect := Types.Rect(0, 0, Self.ClientWidth - GetSystemMetrics(SM_CXVSCROLL) - 4, 0)
     else
-      TextRect := Types.Rect(0, 0, 32767, 0);  // large enough to avoid wrapping
+      TextRect := Types.Rect(0, 0, 32767, 0);
 
     DrawText(
       Bmp.Canvas.Handle,
@@ -627,13 +649,25 @@ begin
       Flags
       );
 
-    // Free space = visible height – actual text height
-    Result := Round(Self.ClientHeight - (TextRect.Bottom - TextRect.Top) * Self.ZoomFactor);
-    if Result < 0 then
-      Result := 0;
+    Result := TextRect.Bottom - TextRect.Top;
   finally
     Bmp.Free;
   end;
+end;
+
+function TRichMemoHelper.GetBottomSpace: integer;
+begin
+  if Self.Text = '' then
+  begin
+    Result := Self.ClientHeight;
+    Exit;
+  end;
+
+  // Free space = visible height - actual text height
+  Result := Self.ClientHeight - Self.GetTextHeight;
+
+  if Result < 0 then
+    Result := 0;
 end;
 
 procedure TRichMemoHelper.SaveToFileSafe(AFileName: string);
@@ -731,25 +765,77 @@ begin
   Self.SelLength := RightIdx - LeftIdx;
 end;
 
-procedure TRichMemoHelper.DisableBuiltInDragDrop;
+procedure TRichMemoHelper.SuspendUndo;
 {$IFDEF WINDOWS}
-const
-  ES_NOOLEDRAGDROP = $0008;
 var
-  Style: nativeuint;
+  RichEditOle: IUnknown;
+  Doc: IDispatch;
+  DispID: TDispID;
+  Params: array[0..0] of OleVariant;
+  DispParams: TDispParams;
+  NameWide: WideString;
+  NamePtr: PWideChar;
 {$ENDIF}
 begin
   {$IFDEF WINDOWS}
-  HandleNeeded;
+  RichEditOle := nil;
+  DispParams:=Default(TDispParams);
+  {$HINTS OFF}
+  if SendMessage(Self.Handle, EM_GETOLEINTERFACE, 0, LPARAM(@RichEditOle)) = 0 then Exit;
+  {$HINTS ON}
+  if not Assigned(RichEditOle) then Exit;
+  if Failed(RichEditOle.QueryInterface(IDispatch, Doc)) then Exit;
 
-  Style := GetWindowLongPtr(Handle, GWL_STYLE);
+  NameWide := 'Undo';
+  NamePtr := PWideChar(NameWide);
+  if Failed(Doc.GetIDsOfNames(GUID_NULL, @NamePtr, 1, LOCALE_SYSTEM_DEFAULT, @DispID)) then
+    Exit;
 
-  // Add the style only if it is not already present.
-  if (Style and ES_NOOLEDRAGDROP) = 0 then
-    SetWindowLongPtr(Handle, GWL_STYLE, Style or ES_NOOLEDRAGDROP);
+  {$NOTES OFF}
+  Params[0] := tomSuspend;
+  {$NOTES ON}
+  FillChar(DispParams, SizeOf(DispParams), 0);
+  DispParams.rgvarg := @Params[0];
+  DispParams.cArgs := 1;
+  Doc.Invoke(DispID, GUID_NULL, LOCALE_SYSTEM_DEFAULT, DISPATCH_METHOD,
+    DispParams, nil, nil, nil);
+  {$ENDIF}
+end;
 
-  // Revoke any existing OLE drop target (cheap operation).
-  RevokeDragDrop(Handle);
+procedure TRichMemoHelper.ResumeUndo;
+{$IFDEF WINDOWS}
+var
+  RichEditOle: IUnknown;
+  Doc: IDispatch;
+  DispID: TDispID;
+  Params: array[0..0] of OleVariant;
+  DispParams: TDispParams;
+  NameWide: WideString;
+  NamePtr: PWideChar;
+{$ENDIF}
+begin
+  {$IFDEF WINDOWS}
+  RichEditOle := nil;
+  DispParams:=Default(TDispParams);
+  {$HINTS OFF}
+  if SendMessage(Self.Handle, EM_GETOLEINTERFACE, 0, LPARAM(@RichEditOle)) = 0 then Exit;
+  {$HINTS ON}
+  if not Assigned(RichEditOle) then Exit;
+  if Failed(RichEditOle.QueryInterface(IDispatch, Doc)) then Exit;
+
+  NameWide := 'Undo';
+  NamePtr := PWideChar(NameWide);
+  if Failed(Doc.GetIDsOfNames(GUID_NULL, @NamePtr, 1, LOCALE_SYSTEM_DEFAULT, @DispID)) then
+    Exit;
+
+  {$NOTES OFF}
+  Params[0] := tomResume;
+  {$NOTES ON}
+  FillChar(DispParams, SizeOf(DispParams), 0);
+  DispParams.rgvarg := @Params[0];
+  DispParams.cArgs := 1;
+  Doc.Invoke(DispID, GUID_NULL, LOCALE_SYSTEM_DEFAULT, DISPATCH_METHOD,
+    DispParams, nil, nil, nil);
   {$ENDIF}
 end;
 
@@ -806,6 +892,8 @@ var
 {$ENDIF}
 begin
   {$IFDEF WINDOWS}
+  SuspendUndo;
+  try
   if AIndentPixels < 0 then
     AIndentPixels := 0;
 
@@ -873,6 +961,31 @@ begin
 
   // Let Windows repaint normally without forcing immediate redraw.
   InvalidateRect(Handle, nil, False);
+  finally
+    ResumeUndo;
+  end;
+  {$ENDIF}
+end;
+
+procedure TRichMemoHelper.DisableBuiltInDragDrop;
+{$IFDEF WINDOWS}
+const
+  ES_NOOLEDRAGDROP = $0008;
+var
+  Style: nativeuint;
+{$ENDIF}
+begin
+  {$IFDEF WINDOWS}
+  HandleNeeded;
+
+  Style := GetWindowLongPtr(Handle, GWL_STYLE);
+
+  // Add the style only if it is not already present.
+  if (Style and ES_NOOLEDRAGDROP) = 0 then
+    SetWindowLongPtr(Handle, GWL_STYLE, Style or ES_NOOLEDRAGDROP);
+
+  // Revoke any existing OLE drop target (cheap operation).
+  RevokeDragDrop(Handle);
   {$ENDIF}
 end;
 
@@ -891,11 +1004,15 @@ begin
 
   // Save the original window procedure and store the parent panel
   OldProc := GetWindowLongPtr(WinCtrl.Handle, GWL_WNDPROC);
+  {$HINTS OFF}
   SetProp(WinCtrl.Handle, 'OldRichMemoWndProc', Pointer(OldProc));
+  {$HINTS ON}
   SetProp(WinCtrl.Handle, 'ScrollFixParentPanel', Pointer(AParentPanel));
 
   // Replace the window procedure with our custom one
+  {$HINTS OFF}
   SetWindowLongPtr(WinCtrl.Handle, GWL_WNDPROC, LONG_PTR(@RichMemoScrollWndProc));
+  {$HINTS ON}
   {$ENDIF}
 end;
 

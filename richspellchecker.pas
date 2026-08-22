@@ -16,7 +16,8 @@ uses
   {$ELSE}
   RichMemoHelpers,
   {$ENDIF}
-  RichMemo;
+  RichMemo,
+  RichMemoHelper;
 
 type
   TSpellCheckOption = (scoSpelling, scoComprehensiveSpelling);
@@ -46,9 +47,6 @@ type
     procedure ClearUnderlines;
     procedure ReplacementClick(Sender: TObject);
     function GetCharIndexAtPos(X, Y: integer): integer;
-    // Temporarily suspend Undo recording to avoid formatting operations being undoable
-    procedure SuspendUndo;  // temporarily suspend Undo recording
-    procedure ResumeUndo;   // resume Undo recording
   public
     constructor Create(ARichMemo: TRichMemo);
     destructor Destroy; override;
@@ -74,7 +72,6 @@ const
   EM_EXSETSEL = WM_USER + 55;
   EM_SETCHARFORMAT = WM_USER + 68;
   EM_CHARFROMPOS = $00D7;
-  EM_GETOLEINTERFACE = WM_USER + 60; // added
 
   SCF_SELECTION = $0001;
 
@@ -88,9 +85,6 @@ const
 
   EM_GETSCROLLPOS = WM_USER + 221;
   EM_SETSCROLLPOS = WM_USER + 222;
-
-  tomSuspend = -9999995; // tomSuspend constant
-  tomResume  = -9999994; // tomResume constant
 
 type
   CHARRANGE = record
@@ -201,80 +195,6 @@ begin
   ApplyUnderlines;
 end;
 
-procedure TRichSpellChecker.SuspendUndo;
-{$IFDEF WINDOWS}
-var
-  RichEditOle: IUnknown;
-  Doc: IDispatch;
-  DispID: TDispID;
-  Params: array[0..0] of OleVariant;
-  DispParams: TDispParams;
-  NameWide: WideString;
-  NamePtr: PWideChar;
-{$ENDIF}
-begin
-  {$IFDEF WINDOWS}
-  RichEditOle := nil;
-  DispParams:=Default(TDispParams);
-  {$HINTS OFF}
-  if SendMessage(FRichMemo.Handle, EM_GETOLEINTERFACE, 0, LPARAM(@RichEditOle)) = 0 then Exit;
-  {$HINTS ON}
-  if not Assigned(RichEditOle) then Exit;
-  if Failed(RichEditOle.QueryInterface(IDispatch, Doc)) then Exit;
-
-  NameWide := 'Undo';
-  NamePtr := PWideChar(NameWide);
-  if Failed(Doc.GetIDsOfNames(GUID_NULL, @NamePtr, 1, LOCALE_SYSTEM_DEFAULT, @DispID)) then
-    Exit;
-
-  {$NOTES OFF}
-  Params[0] := tomSuspend;
-  {$NOTES ON}
-  FillChar(DispParams, SizeOf(DispParams), 0);
-  DispParams.rgvarg := @Params[0];
-  DispParams.cArgs := 1;
-  Doc.Invoke(DispID, GUID_NULL, LOCALE_SYSTEM_DEFAULT, DISPATCH_METHOD,
-    DispParams, nil, nil, nil);
-  {$ENDIF}
-end;
-
-procedure TRichSpellChecker.ResumeUndo;
-{$IFDEF WINDOWS}
-var
-  RichEditOle: IUnknown;
-  Doc: IDispatch;
-  DispID: TDispID;
-  Params: array[0..0] of OleVariant;
-  DispParams: TDispParams;
-  NameWide: WideString;
-  NamePtr: PWideChar;
-{$ENDIF}
-begin
-  {$IFDEF WINDOWS}
-  RichEditOle := nil;
-  DispParams:=Default(TDispParams);
-  {$HINTS OFF}
-  if SendMessage(FRichMemo.Handle, EM_GETOLEINTERFACE, 0, LPARAM(@RichEditOle)) = 0 then Exit;
-  {$HINTS ON}
-  if not Assigned(RichEditOle) then Exit;
-  if Failed(RichEditOle.QueryInterface(IDispatch, Doc)) then Exit;
-
-  NameWide := 'Undo';
-  NamePtr := PWideChar(NameWide);
-  if Failed(Doc.GetIDsOfNames(GUID_NULL, @NamePtr, 1, LOCALE_SYSTEM_DEFAULT, @DispID)) then
-    Exit;
-
-  {$NOTES OFF}
-  Params[0] := tomResume;
-  {$NOTES ON}
-  FillChar(DispParams, SizeOf(DispParams), 0);
-  DispParams.rgvarg := @Params[0];
-  DispParams.cArgs := 1;
-  Doc.Invoke(DispID, GUID_NULL, LOCALE_SYSTEM_DEFAULT, DISPATCH_METHOD,
-    DispParams, nil, nil, nil);
-  {$ENDIF}
-end;
-
 procedure TRichSpellChecker.ClearUnderlines;
 var
   OldSelStart, OldSelLength: integer;
@@ -298,7 +218,7 @@ begin
   {$HINTS ON}
 
   // Suspend Undo so this formatting change does not appear in history
-  SuspendUndo;
+  FRichMemo.SuspendUndo;
   try
     // Block repainting
     SendMessage(FRichMemo.Handle, WM_SETREDRAW, 0, 0);
@@ -331,7 +251,7 @@ begin
       FRichMemo.Invalidate;
     end;
   finally
-    ResumeUndo;
+    FRichMemo.ResumeUndo;
   end;
   {$ELSE}
   if not Assigned(FRichMemo) then
@@ -384,7 +304,7 @@ begin
     Exit;
 
   // Suspend Undo for this formatting operation
-  SuspendUndo;
+  FRichMemo.SuspendUndo;
   try
     cr.cpMin := AError^.Offset;
     cr.cpMax := AError^.Offset + AError^.Length;
@@ -405,7 +325,7 @@ begin
 
     FRichMemo.SelLength := 0;
   finally
-    ResumeUndo;
+    FRichMemo.ResumeUndo;
   end;
   {$ELSE}
   if not Assigned(FRichMemo) or (AError = nil) then
@@ -441,7 +361,7 @@ begin
   {$HINTS ON}
 
   // Suspend Undo for the entire batch of formatting
-  SuspendUndo;
+  FRichMemo.SuspendUndo;
   try
     // Block repainting while applying all underlines
     SendMessage(FRichMemo.Handle, WM_SETREDRAW, 0, 0);
@@ -460,7 +380,7 @@ begin
       FRichMemo.Invalidate;
     end;
   finally
-    ResumeUndo;
+    FRichMemo.ResumeUndo;
   end;
   {$ENDIF}
 end;
@@ -670,7 +590,7 @@ begin
   {$HINTS ON}
 
   // Suspend Undo for formatting change
-  SuspendUndo;
+  FRichMemo.SuspendUndo;
   try
     // Select the new text range (old offset, new length)
     cr.cpMin := AError^.Offset;
@@ -697,7 +617,7 @@ begin
     SendMessage(FRichMemo.Handle, EM_SETSCROLLPOS, 0, LPARAM(PtrInt(@scrollPos)));
     {$HINTS ON}
   finally
-    ResumeUndo;
+    FRichMemo.ResumeUndo;
   end;
 
   // Remove error from list
