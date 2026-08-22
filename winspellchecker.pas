@@ -106,7 +106,9 @@ function GetSupportedSpellCheckerLanguages: TSupportedLanguages;
 
 implementation
 
-{$IFDEF WINDOWS}
+uses localize;
+
+  {$IFDEF WINDOWS}
 
 var
   SpellCheckerLanguagesCache: TSupportedLanguages = nil;
@@ -144,7 +146,8 @@ begin
   Result := UTF8Length(Copy(Utf8Str, 1, ByteIndex - 1));
 end;
 
-procedure ExtractErrorsFromEnum(const Text: widestring; checker: ISpellChecker; enum: IEnumSpellingError; out ErrorArray: TSpellErrorArray);
+procedure ExtractErrorsFromEnum(const Text: widestring; checker: ISpellChecker; enum: IEnumSpellingError;
+  out ErrorArray: TSpellErrorArray);
 var
   errorItem: ISpellingError = nil;
   suggEnum: IEnumString = nil;
@@ -229,7 +232,8 @@ begin
   Result := (E1.Start = E2.Start) and (E1.Length = E2.Length);
 end;
 
-function CheckSpellingInternal(const Text: widestring; const LanguageTag: string; out Errors: TSpellErrorArray; Options: TSpellCheckOptions): boolean;
+function CheckSpellingInternal(const Text: widestring; const LanguageTag: string; out Errors: TSpellErrorArray;
+  Options: TSpellCheckOptions): boolean;
 var
   factory: ISpellCheckerFactory = nil;
   checker: ISpellChecker = nil;
@@ -338,7 +342,8 @@ begin
   Result := CheckSpellingInternal(Text, LanguageTag, Errors, [scoSpelling]);
 end;
 
-function CheckSpelling(const Text: widestring; const LanguageTag: string; out Errors: TSpellErrorArray; Options: TSpellCheckOptions): boolean;
+function CheckSpelling(const Text: widestring; const LanguageTag: string; out Errors: TSpellErrorArray;
+  Options: TSpellCheckOptions): boolean;
 begin
   Result := CheckSpellingInternal(Text, LanguageTag, Errors, Options);
 end;
@@ -384,16 +389,56 @@ begin
   end;
 end;
 
+function NormalizeTwoLetterCode(const Value: string): string;
+var
+  Candidate: string = '';
+  PreferredTag: string = '';
+  Langs: TSupportedLanguages = nil;
+  i: integer = 0;
+  Prefix: string = '';
+begin
+  Result := '';
+
+  // Try the constructed tag xx-XX first
+  Candidate := LowerCase(Value) + '-' + UpperCase(Value);
+  if IsLanguageSupported(WideString(Candidate)) then
+  begin
+    Result := Candidate;
+    Exit;
+  end;
+
+  // Then try the preferred tag from the manual list
+  PreferredTag := GetPreferredLanguageTag(Value);
+  if (PreferredTag <> '') and IsLanguageSupported(WideString(PreferredTag)) then
+  begin
+    Result := PreferredTag;
+    Exit;
+  end;
+
+  // If neither works, find the first available language with the same prefix
+  Langs := GetSupportedSpellCheckerLanguages;
+  Prefix := LowerCase(Value) + '-';
+  for i := 0 to High(Langs) do
+  begin
+    if Pos(Prefix, LowerCase(string(Langs[i]))) = 1 then
+    begin
+      Result := string(Langs[i]);
+      Break;
+    end;
+  end;
+
+  // Last resort: return the constructed tag even if not supported
+  if Result = '' then
+    Result := Candidate;
+end;
+
 function NormalizeLanguageTag(const Input: string): widestring;
 var
   Part1: string = '';
   Part2: string = '';
   dashPos: integer = 0;
-  Candidate: string = '';
-  Langs: TSupportedLanguages = nil;
-  i: integer = 0;
-  Prefix: string = '';
-  PreferredTag: string = '';
+const
+  MAX_LANG_LENGTH = 15;
 begin
   Result := '';
   if Input = '' then Exit;
@@ -403,48 +448,21 @@ begin
   begin
     // No dash, assume short code like "en"
     if Length(Input) = 2 then
-    begin
-      // Try the constructed tag xx-XX first
-      Candidate := LowerCase(Input) + '-' + UpperCase(Input);
-      if IsLanguageSupported(WideString(Candidate)) then
-      begin
-        Result := WideString(Candidate);
-        Exit;
-      end;
-
-      // Then try the preferred tag from the manual list
-      PreferredTag := GetPreferredLanguageTag(Input);
-      if (PreferredTag <> '') and IsLanguageSupported(WideString(PreferredTag)) then
-      begin
-        Result := WideString(PreferredTag);
-        Exit;
-      end;
-
-      // If neither works, find the first available language with the same prefix
-      Langs := GetSupportedSpellCheckerLanguages;
-      Prefix := LowerCase(Input) + '-';
-      for i := 0 to High(Langs) do
-      begin
-        if Pos(Prefix, LowerCase(string(Langs[i]))) = 1 then
-        begin
-          Result := Langs[i];
-          Break;
-        end;
-      end;
-
-      // Last resort: return the constructed tag even if not supported
-      if Result = '' then
-        Result := WideString(Candidate);
-    end
+      Result := WideString(NormalizeTwoLetterCode(Input))
     else
-      Result := WideString(Input);
+      Result := WideString(NormalizeTwoLetterCode(Language));
   end
   else
   begin
-    // Already has a dash, just normalize case
-    Part1 := Copy(Input, 1, dashPos - 1);
-    Part2 := Copy(Input, dashPos + 1, Length(Input) - dashPos);
-    Result := WideString(LowerCase(Part1) + '-' + UpperCase(Part2));
+    if Length(Input) > MAX_LANG_LENGTH then
+      Result := WideString(NormalizeTwoLetterCode(Language))
+    else
+    begin
+      // Already has a dash, just normalize case
+      Part1 := Copy(Input, 1, dashPos - 1);
+      Part2 := Copy(Input, dashPos + 1, Length(Input) - dashPos);
+      Result := WideString(LowerCase(Part1) + '-' + UpperCase(Part2));
+    end;
   end;
 end;
 
@@ -504,6 +522,6 @@ begin
   end;
 end;
 
-{$ENDIF}
+  {$ENDIF}
 
 end.
