@@ -67,7 +67,7 @@ implementation
 
 {$IFDEF WINDOWS}
 uses
-  Windows, LCLType, ComObj, ActiveX, Variants;
+  Windows, LCLType, ComObj, Variants;
 
 const
   EM_EXSETSEL = WM_USER + 55;
