@@ -27,10 +27,11 @@ type
     Offset: integer;
     Length: integer;
     Message: string;
-    Replacements: TStringList;
+    Replacements: array of string;
     Color: TColor;
   end;
   PSpellError = ^TSpellError;
+  TSpellErrorArray = array of TSpellError;
 
   TRichSpellChecker = class
   private
@@ -115,7 +116,6 @@ type
     bUnderlineColor: Byte;
   end;
 
-
   function MapColorToWinUnderline(AColor: TColor): Byte;
   const
     // Windows underline color indices (user may adjust these)
@@ -168,8 +168,7 @@ begin
     p := PSpellError(FErrors[i]);
     if Assigned(p) then
     begin
-      if Assigned(p^.Replacements) then
-        p^.Replacements.Free;
+      // Replacements is now a managed dynamic array, no manual Free needed
       Dispose(p);
     end;
     FErrors.Delete(i);
@@ -282,10 +281,11 @@ begin
   err^.Offset := AOffset;
   err^.Length := ALength;
   err^.Message := AMessage;
-  err^.Replacements := TStringList.Create;
   err^.Color := AColor;
+  // Copy replacements from open array to dynamic array
+  SetLength(err^.Replacements, Length(AReplacements));
   for i := Low(AReplacements) to High(AReplacements) do
-    err^.Replacements.Add(AReplacements[i]);
+    err^.Replacements[i] := AReplacements[i];
 
   FErrors.Add(err);
   if FApplyImmediately then
@@ -479,7 +479,7 @@ begin
   FMenu.Items.Clear;
 
   // Add new replacement items
-  for i := 0 to Error^.Replacements.Count - 1 do
+  for i := 0 to High(Error^.Replacements) do
   begin
     Item := TMenuItem.Create(FMenu);
     Item.Caption := Error^.Replacements[i];
@@ -622,8 +622,7 @@ begin
 
   // Remove error from list
   FErrors.Remove(AError);
-  if Assigned(AError^.Replacements) then
-    AError^.Replacements.Free;
+  // Replacements is now a managed dynamic array, no manual Free needed
   Dispose(AError);
   {$ENDIF}
 end;
