@@ -40,6 +40,7 @@ type
     FOnSpellCheckNeeded: TNotifyEvent;
     FApplyImmediately: boolean;
     FContextCaretPos: integer; // caret position when context menu was invoked
+    FUpdateLock: integer; // blocks context menu while updates are in progress
     function GetErrorAtTextPos(ATextPos: integer): PSpellError;
     procedure ApplyUnderlineToError(AError: PSpellError);
     procedure ClearUnderlines;
@@ -152,6 +153,7 @@ begin
   FCurrentError := nil;
   FApplyImmediately := True;
   FContextCaretPos := -1;
+  FUpdateLock := 0;
 end;
 
 destructor TRichSpellChecker.Destroy;
@@ -184,11 +186,17 @@ end;
 
 procedure TRichSpellChecker.BeginUpdate;
 begin
+  if FUpdateLock = 0 then
+    FMenu.Close; // close context menu if it is open
+  Inc(FUpdateLock);
   FApplyImmediately := False;
 end;
 
 procedure TRichSpellChecker.EndUpdate;
 begin
+  Dec(FUpdateLock);
+  if FUpdateLock < 0 then
+    FUpdateLock := 0; // safety guard against unbalanced calls
   FApplyImmediately := True;
   ApplyUnderlines;
 end;
@@ -532,6 +540,9 @@ begin
   if not Assigned(FRichMemo) then
     Exit;
 
+  if FUpdateLock > 0 then
+    Exit; // do not show menu while updates are in progress
+
   CharIndex := GetCharIndexAtPos(X, Y);
   if CharIndex < 0 then
     Exit;
@@ -573,40 +584,50 @@ var
   RelPos: integer;
   OldError: PSpellError;
   NewLength: integer;
+  OldOnChange: TNotifyEvent; // saved OnChange handler
 begin
   if FCurrentError = nil then
     Exit;
 
-  Item := Sender as TMenuItem;
-  Replacement := Item.Caption;
-  OldError := FCurrentError;
-  NewLength := Length(Replacement);
+  // Temporarily disable OnChange event to prevent reentrant spell checking
+  OldOnChange := FRichMemo.OnChange;
+  FRichMemo.OnChange := nil;
+  try
 
-  // Calculate new caret position based on saved context position
-  NewCaretPos := -1;
-  if (FContextCaretPos >= OldError^.Offset) and (FContextCaretPos <= OldError^.Offset + OldError^.Length) then
-  begin
-    RelPos := FContextCaretPos - OldError^.Offset;
-    if RelPos > NewLength then
-      RelPos := NewLength;
-    NewCaretPos := OldError^.Offset + RelPos;
+    Item := Sender as TMenuItem;
+    Replacement := Item.Caption;
+    OldError := FCurrentError;
+    NewLength := Length(Replacement);
+
+    // Calculate new caret position based on saved context position
+    NewCaretPos := -1;
+    if (FContextCaretPos >= OldError^.Offset) and (FContextCaretPos <= OldError^.Offset + OldError^.Length) then
+    begin
+      RelPos := FContextCaretPos - OldError^.Offset;
+      if RelPos > NewLength then
+        RelPos := NewLength;
+      NewCaretPos := OldError^.Offset + RelPos;
+    end;
+
+    // Replace the error text (normal undoable operation)
+    ReplaceError(OldError, Replacement, NewCaretPos);
+
+    // Remove only this error and its underline, without full clear
+    RemoveError(OldError, NewLength);
+
+    // Ensure no selection remains
+    FRichMemo.SelLength := 0;
+
+    // Reset context caret position
+    FContextCaretPos := -1;
+    FCurrentError := nil;
+
+    if Assigned(FOnSpellCheckNeeded) then
+      FOnSpellCheckNeeded(Self);
+  finally
+    // Restore original OnChange handler
+    FRichMemo.OnChange := OldOnChange;
   end;
-
-  // Replace the error text (normal undoable operation)
-  ReplaceError(OldError, Replacement, NewCaretPos);
-
-  // Remove only this error and its underline, without full clear
-  RemoveError(OldError, NewLength);
-
-  // Ensure no selection remains
-  FRichMemo.SelLength := 0;
-
-  // Reset context caret position
-  FContextCaretPos := -1;
-  FCurrentError := nil;
-
-  if Assigned(FOnSpellCheckNeeded) then
-    FOnSpellCheckNeeded(Self);
 end;
 
 procedure TRichSpellChecker.ReplaceError(AError: PSpellError; const ANewText: string; NewCaretPos: integer);
