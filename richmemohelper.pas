@@ -15,6 +15,7 @@ uses
   Classes,
   Graphics,
   Types,
+  Math,
   SysUtils,
   StrUtils,
   Clipbrd,
@@ -623,14 +624,17 @@ var
   TextRect: TRect;
   Txt: string;
   Flags: cardinal;
+  LogicalWidth: integer; // Logical width for DrawText
 begin
   Txt := Self.Text;
 
   if Txt = '' then
     Exit(0);
 
-  if (Length(Txt) > 0) and (Txt[Length(Txt)] in [#10, #13]) then
-    Txt := Txt + ' ';
+  // Always add LineEnding
+  Txt := Txt + LineEnding + ' ';
+  //if (Length(Txt) > 0) and (Txt[Length(Txt)] in [#10, #13]) then
+  //  Txt := Txt + ' ';
 
   Flags := DT_CALCRECT or DT_EDITCONTROL or DT_NOPREFIX;
 
@@ -641,11 +645,13 @@ begin
   try
     Bmp.Canvas.Font.Assign(Self.Font);
 
-    // Apply RichMemo zoom to the font
-    Bmp.Canvas.Font.Height := Round(Bmp.Canvas.Font.Height * Self.ZoomFactor);
-
+    // Keep original font, adjust only logical width according to zoom
     if Self.WordWrap then
-      TextRect := Types.Rect(0, 0, Self.ClientWidth - GetSystemMetrics(SM_CXVSCROLL) - 4, 0)
+    begin
+      // Logical width is the physical width divided by zoom factor
+      LogicalWidth := Round((Self.ClientWidth - GetSystemMetrics(SM_CXVSCROLL) - 4) / Self.ZoomFactor);
+      TextRect := Types.Rect(0, 0, LogicalWidth, 0);
+    end
     else
       TextRect := Types.Rect(0, 0, 32767, 0);
 
@@ -657,7 +663,9 @@ begin
       Flags
       );
 
-    Result := TextRect.Bottom - TextRect.Top;
+    // Scale the resulting logical height back to physical pixels
+    // Use Ceil to avoid losing a pixel when scaling back to physical pixels
+    Result := Ceil((TextRect.Bottom - TextRect.Top) * Self.ZoomFactor);
   finally
     Bmp.Free;
   end;
