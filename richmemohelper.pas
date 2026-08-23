@@ -100,59 +100,75 @@ uses
 {$IFDEF WINDOWS}
 
 const
-  tomSuspend = -9999995; // tomSuspend constant
-  tomResume = -9999994; // tomResume constant
-  EM_GETOLEINTERFACE = WM_USER + 60; // added
+  SCROLLBAR_FIX_TIMER_ID = 1;
+  SCROLLBAR_FIX_INTERVAL = 30;
+  tomSuspend = -9999995;
+  tomResume = -9999994;
 
-function RichMemoScrollWndProc(Handle: HWND; Msg: UINT; wParam: WPARAM; lParam: LPARAM): LRESULT; stdcall;
+procedure RichMemoScrollbarFixTimer(
+  Wnd: HWND;
+  uMsg: UINT;
+  idEvent: UINT_PTR;
+  dwTime: DWORD); stdcall;
 var
   ParentPanel: TWinControl;
-  OldProc: LONG_PTR;
+  Rect: TRect;
+  CursorPos: TPoint;
+  ScrollbarSize: Integer;
+  OverScrollbar: Boolean;
+  NeedComposited: Boolean;
+  CurrentComposited: Boolean;
+  ExStyle: LONG_PTR;
 begin
-  case Msg of
-    WM_NCLBUTTONDOWN:
-      begin
-        // User pressed the vertical or horizontal scrollbar
-        if (wParam = HTVSCROLL) or (wParam = HTHSCROLL) then
-        begin
-          ParentPanel := TWinControl(Pointer(GetProp(Handle, 'ScrollFixParentPanel')));
-          if Assigned(ParentPanel) then
-            ParentPanel.SetComposited(False); // Disable compositing during scroll drag
-        end;
-      end;
+  ParentPanel := TWinControl(Pointer(GetProp(
+    Wnd, 'ScrollFixParentPanel')));
 
-    WM_VSCROLL, WM_HSCROLL:
-      begin
-        // Call the original window procedure first
-        {$HINTS OFF}
-        OldProc := LONG_PTR(GetProp(Handle, 'OldRichMemoWndProc'));
-        if OldProc <> 0 then
-          Result := CallWindowProc(WNDPROC(OldProc), Handle, Msg, wParam, lParam)
-        else
-          Result := DefWindowProc(Handle, Msg, wParam, lParam);
-        {$HINTS ON}
+  if not Assigned(ParentPanel) then Exit;
+  if not ParentPanel.HandleAllocated then Exit;
 
-        // If the scroll operation has ended, re-enable compositing
-        if (wParam = SB_ENDSCROLL) or (wParam = SB_THUMBPOSITION) then
-        begin
-          ParentPanel := TWinControl(Pointer(GetProp(Handle, 'ScrollFixParentPanel')));
-          if Assigned(ParentPanel) then
-            ParentPanel.SetComposited(True); // Restore compositing
-        end;
+  CursorPos := Default(TPoint);
+  Rect := Default(TRect);
 
-        Exit; // We already processed the message
-      end;
+  GetCursorPos(CursorPos);
+  GetWindowRect(Wnd, Rect);
+
+  OverScrollbar := False;
+
+  // Check if cursor is over vertical scrollbar
+  ScrollbarSize := GetSystemMetrics(SM_CXVSCROLL);
+
+  if (GetWindowLongPtr(Wnd, GWL_STYLE) and WS_VSCROLL) <> 0 then
+    if (CursorPos.X >= Rect.Right - ScrollbarSize) and
+       (CursorPos.X < Rect.Right) and
+       (CursorPos.Y >= Rect.Top) and
+       (CursorPos.Y < Rect.Bottom) then
+      OverScrollbar := True;
+
+  // Check if cursor is over horizontal scrollbar
+  if not OverScrollbar then
+  begin
+    ScrollbarSize := GetSystemMetrics(SM_CYHSCROLL);
+
+    if (GetWindowLongPtr(Wnd, GWL_STYLE) and WS_HSCROLL) <> 0 then
+      if (CursorPos.Y >= Rect.Bottom - ScrollbarSize) and
+         (CursorPos.Y < Rect.Bottom) and
+         (CursorPos.X >= Rect.Left) and
+         (CursorPos.X < Rect.Right) then
+        OverScrollbar := True;
   end;
 
-  // Default: call the original procedure
-  {$HINTS OFF}
-  OldProc := LONG_PTR(GetProp(Handle, 'OldRichMemoWndProc'));
-  if OldProc <> 0 then
-    Result := CallWindowProc(WNDPROC(OldProc), Handle, Msg, wParam, lParam)
-  else
-    Result := DefWindowProc(Handle, Msg, wParam, lParam);
-  {$HINTS ON}
+  // Keep compositing disabled only while dragging a scrollbar
+  NeedComposited :=
+    not (OverScrollbar and
+         ((GetAsyncKeyState(VK_LBUTTON) and $8000) <> 0));
+
+  ExStyle := GetWindowLongPtr(ParentPanel.Handle, GWL_EXSTYLE);
+  CurrentComposited := (ExStyle and WS_EX_COMPOSITED) <> 0;
+
+  if CurrentComposited <> NeedComposited then
+    ParentPanel.SetComposited(NeedComposited);
 end;
+
 {$ENDIF}
 
 procedure TRichMemoHelper.InsertRtfAtCursor(const ARtf: string);
@@ -1006,29 +1022,27 @@ begin
 end;
 
 procedure TRichMemoHelper.EnableScrollbarFix(AParentPanel: TWinControl);
-{$IFDEF WINDOWS}
-var
-  WinCtrl: TWinControl;
-  OldProc: LONG_PTR;
-{$ENDIF}
 begin
   {$IFDEF WINDOWS}
   if not (Self is TWinControl) then Exit;
-  WinCtrl := TWinControl(Self);
-  WinCtrl.HandleNeeded;
-  if not WinCtrl.HandleAllocated then Exit;
+  if not Assigned(AParentPanel) then Exit;
 
-  // Save the original window procedure and store the parent panel
-  OldProc := GetWindowLongPtr(WinCtrl.Handle, GWL_WNDPROC);
-  {$HINTS OFF}
-  SetProp(WinCtrl.Handle, 'OldRichMemoWndProc', Pointer(OldProc));
-  {$HINTS ON}
-  SetProp(WinCtrl.Handle, 'ScrollFixParentPanel', Pointer(AParentPanel));
+  TWinControl(Self).HandleNeeded;
+  AParentPanel.HandleNeeded;
 
-  // Replace the window procedure with our custom one
-  {$HINTS OFF}
-  SetWindowLongPtr(WinCtrl.Handle, GWL_WNDPROC, LONG_PTR(@RichMemoScrollWndProc));
-  {$HINTS ON}
+  if not TWinControl(Self).HandleAllocated then Exit;
+  if not AParentPanel.HandleAllocated then Exit;
+
+  SetProp(
+    TWinControl(Self).Handle,
+    'ScrollFixParentPanel',
+    Pointer(AParentPanel));
+
+  SetTimer(
+    TWinControl(Self).Handle,
+    SCROLLBAR_FIX_TIMER_ID,
+    SCROLLBAR_FIX_INTERVAL,
+    @RichMemoScrollbarFixTimer);
   {$ENDIF}
 end;
 
