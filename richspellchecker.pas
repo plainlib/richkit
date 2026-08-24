@@ -230,10 +230,11 @@ begin
 
       cf := Default(CHARFORMAT2W);
       cf.cbSize := SizeOf(cf);
-      cf.dwMask := CFM_UNDERLINE or CFM_UNDERLINETYPE or CFM_UNDERLINECOLOR;
+      cf.dwMask := CFM_UNDERLINE or CFM_UNDERLINETYPE or CFM_UNDERLINECOLOR or CFM_COLOR;
       cf.dwEffects := 0;
       cf.bUnderlineType := CFU_UNDERLINENONE;
       cf.bUnderlineColor := 0;
+      cf.crTextColor := GetSysColor(COLOR_WINDOWTEXT);
 
       {$HINTS OFF}
       SendMessage(FRichMemo.Handle, EM_SETCHARFORMAT, SCF_SELECTION, LPARAM(PtrInt(@cf)));
@@ -314,10 +315,11 @@ begin
 
     cf := Default(CHARFORMAT2W);
     cf.cbSize := SizeOf(cf);
-    cf.dwMask := CFM_UNDERLINE or CFM_UNDERLINETYPE or CFM_UNDERLINECOLOR;
+    cf.dwMask := CFM_UNDERLINE or CFM_UNDERLINETYPE or CFM_UNDERLINECOLOR or CFM_COLOR;
     cf.dwEffects := CFE_UNDERLINE;
     cf.bUnderlineType := CFU_UNDERLINEWAVE;
     cf.bUnderlineColor := MapColorToWinUnderline(AError^.Color);
+    cf.crTextColor := GetSysColor(COLOR_WINDOWTEXT);
 
     {$HINTS OFF}
     SendMessage(FRichMemo.Handle, EM_SETCHARFORMAT, SCF_SELECTION, LPARAM(PtrInt(@cf)));
@@ -602,10 +604,12 @@ begin
     // Clear underline only for the selected range
     cf := Default(CHARFORMAT2W);
     cf.cbSize := SizeOf(cf);
-    cf.dwMask := CFM_UNDERLINE or CFM_UNDERLINETYPE or CFM_UNDERLINECOLOR;
+    cf.dwMask := CFM_UNDERLINE or CFM_UNDERLINETYPE or CFM_UNDERLINECOLOR or CFM_COLOR;
     cf.dwEffects := 0;
     cf.bUnderlineType := CFU_UNDERLINENONE;
     cf.bUnderlineColor := 0;
+    cf.crTextColor := GetSysColor(COLOR_WINDOWTEXT);
+
     {$HINTS OFF}
     SendMessage(FRichMemo.Handle, EM_SETCHARFORMAT, SCF_SELECTION, LPARAM(PtrInt(@cf)));
     {$HINTS ON}
