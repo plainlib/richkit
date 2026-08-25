@@ -83,6 +83,9 @@ type
 
     // Disable Composited mode while scrolling Memo
     procedure EnableScrollbarFix(AParentPanel: TWinControl);
+
+    // Assigns text while maintaining zoom factor
+    procedure SetTextSafe(const AText: string);
   end;
 
 implementation
@@ -1044,6 +1047,15 @@ begin
     SCROLLBAR_FIX_INTERVAL,
     @RichMemoScrollbarFixTimer);
   {$ENDIF}
+end;
+
+procedure TRichMemoHelper.SetTextSafe(const AText: string);
+var
+  ZoomFactor: double;
+begin
+  ZoomFactor := Self.ZoomFactor;
+  Self.Text := AText;
+  Self.ZoomFactor := ZoomFactor;
 end;
 
 end.
