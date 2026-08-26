@@ -56,7 +56,7 @@ type
     procedure ApplyBidiMode;
 
     // Get full text height
-    function GetTextHeight: integer;
+    function GetTextHeight(AText:string): integer;
 
     // Returns the free space below the text in the memo's client area.
     function GetBottomSpace: integer;
@@ -637,23 +637,21 @@ begin
   {$ENDIF}
 end;
 
-function TRichMemoHelper.GetTextHeight: integer;
+function TRichMemoHelper.GetTextHeight(AText:string): integer;
 var
   Bmp: Graphics.TBitmap;
   TextRect: TRect;
-  Txt: string;
   Flags: cardinal;
   LogicalWidth: integer; // Logical width for DrawText
 begin
-  Txt := Self.Text;
 
-  if Txt = '' then
+  if AText = '' then
     Exit(0);
 
   // Always add LineEnding
-  Txt := Txt + LineEnding + ' ';
-  //if (Length(Txt) > 0) and (Txt[Length(Txt)] in [#10, #13]) then
-  //  Txt := Txt + ' ';
+  AText := AText + LineEnding + ' ';
+  //if (Length(AText) > 0) and (AText[Length(AText)] in [#10, #13]) then
+  //  AText := AText + ' ';
 
   Flags := DT_CALCRECT or DT_EDITCONTROL or DT_NOPREFIX;
 
@@ -676,8 +674,8 @@ begin
 
     DrawText(
       Bmp.Canvas.Handle,
-      PChar(Txt),
-      Length(Txt),
+      PChar(AText),
+      Length(AText),
       TextRect,
       Flags
       );
@@ -699,7 +697,7 @@ begin
   end;
 
   // Free space = visible height - actual text height
-  Result := Self.ClientHeight - Self.GetTextHeight;
+  Result := Self.ClientHeight - Self.GetTextHeight(Self.Text);
 
   if Result < 0 then
     Result := 0;
