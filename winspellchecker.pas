@@ -352,7 +352,8 @@ end;
 // used when the generic xx-XX form is not the most common variant.
 function GetPreferredLanguageTag(const ShortCode: string): string;
 begin
-  Result := '';
+  Result := string.Empty;
+
   case LowerCase(ShortCode) of
     'en': Result := 'en-US';
     'pt': Result := 'pt-BR';
@@ -369,7 +370,7 @@ begin
     'da': Result := 'da-DK';
     'fi': Result := 'fi-FI';
     'nb': Result := 'nb-NO';
-    'no': Result := 'nb-NO'; // map deprecated 'no' to Norwegian Bokmål
+    'no': Result := 'nb-NO'; // Map deprecated 'no' to Norwegian Bokmål
     'fa': Result := 'fa-IR';
     'ms': Result := 'ms-MY';
     'bn': Result := 'bn-BD';
@@ -386,83 +387,130 @@ begin
     'kk': Result := 'kk-KZ';
     'az': Result := 'az-Latn-AZ';
     'sq': Result := 'sq-AL';
+    'be': Result := 'be-BY';
   end;
 end;
 
 function NormalizeTwoLetterCode(const Value: string): string;
 var
-  Candidate: string = '';
   PreferredTag: string = '';
   Langs: TSupportedLanguages = nil;
-  i: integer = 0;
+  Matches: TSupportedLanguages = nil;
   Prefix: string = '';
+  i: integer = 0;
 begin
-  Result := '';
+  Result := string.Empty;
 
-  // Try the constructed tag xx-XX first
-  Candidate := LowerCase(Value) + '-' + UpperCase(Value);
-  if IsLanguageSupported(WideString(Candidate)) then
-  begin
-    Result := Candidate;
+  if Length(Value) <> 2 then
     Exit;
-  end;
 
-  // Then try the preferred tag from the manual list
-  PreferredTag := GetPreferredLanguageTag(Value);
-  if (PreferredTag <> '') and IsLanguageSupported(WideString(PreferredTag)) then
-  begin
-    Result := PreferredTag;
-    Exit;
-  end;
-
-  // If neither works, find the first available language with the same prefix
-  Langs := GetSupportedSpellCheckerLanguages;
   Prefix := LowerCase(Value) + '-';
+  Langs := GetSupportedSpellCheckerLanguages;
+
+  // Find all installed languages with the same language code.
   for i := 0 to High(Langs) do
   begin
     if Pos(Prefix, LowerCase(string(Langs[i]))) = 1 then
     begin
-      Result := string(Langs[i]);
-      Break;
+      SetLength(Matches, Length(Matches) + 1);
+      Matches[High(Matches)] := Langs[i];
     end;
   end;
 
-  // Last resort: return the constructed tag even if not supported
-  if Result = '' then
-    Result := Candidate;
+  // If there is only one installed variant, use it.
+  if Length(Matches) = 1 then
+  begin
+    Result := string(Matches[0]);
+    Exit;
+  end;
+
+  // If multiple variants are installed, use the preferred one.
+  PreferredTag := GetPreferredLanguageTag(Value);
+  if PreferredTag <> string.Empty then
+  begin
+    for i := 0 to High(Matches) do
+    begin
+      if WideCompareText(Matches[i], WideString(PreferredTag)) = 0 then
+      begin
+        Result := string(Matches[i]);
+        Exit;
+      end;
+    end;
+  end;
+
+  // If no preferred variant is available, use the first installed one.
+  if Length(Matches) > 0 then
+  begin
+    Result := string(Matches[0]);
+    Exit;
+  end;
+
+  // Return the generic tag as a last resort.
+  Result := LowerCase(Value) + '-' + UpperCase(Value);
 end;
 
 function NormalizeLanguageTag(const Input: string): widestring;
 var
-  Part1: string = '';
-  Part2: string = '';
-  dashPos: integer = 0;
+  Parts: TStringList = nil;
+  i: integer = 0;
+  Part: string = '';
+  Normalized: string = '';
 const
   MAX_LANG_LENGTH = 15;
 begin
-  Result := '';
-  if Input = '' then Exit;
+  Result := string.Empty;
 
-  dashPos := Pos('-', Input);
-  if dashPos = 0 then
+  if Input = string.Empty then
+    Exit;
+
+  if Pos('-', Input) = 0 then
   begin
-    // No dash, assume short code like "en"
+    // No dash, assume short code like "en".
     if Length(Input) = 2 then
       Result := WideString(NormalizeTwoLetterCode(Input))
     else
       Result := WideString(NormalizeTwoLetterCode(Language));
-  end
-  else
+
+    Exit;
+  end;
+
+  if Length(Input) > MAX_LANG_LENGTH then
   begin
-    if Length(Input) > MAX_LANG_LENGTH then
-      Result := WideString(NormalizeTwoLetterCode(Language))
-    else
+    Result := WideString(NormalizeTwoLetterCode(Language));
+    Exit;
+  end;
+
+  Parts := TStringList.Create;
+  try
+    Parts.Delimiter := '-';
+    Parts.StrictDelimiter := True;
+    Parts.DelimitedText := Input;
+
+    for i := 0 to Parts.Count - 1 do
     begin
-      // Already has a dash, just normalize case
-      Part1 := Copy(Input, 1, dashPos - 1);
-      Part2 := Copy(Input, dashPos + 1, Length(Input) - dashPos);
-      Result := WideString(LowerCase(Part1) + '-' + UpperCase(Part2));
+      Part := Parts[i];
+
+      if i = 0 then
+        Part := LowerCase(Part)
+      else if Length(Part) = 4 then
+        Part := UpperCase(Copy(Part, 1, 1)) +
+          LowerCase(Copy(Part, 2, Length(Part) - 1))
+      else if (Length(Part) = 2) and
+              (Part[1] >= 'A') and (Part[1] <= 'Z') then
+        Part := UpperCase(Part)
+      else if (Length(Part) = 3) and
+              (Part[1] >= '0') and (Part[1] <= '9') then
+        Part := Part;
+
+      if Normalized = string.Empty then
+        Normalized := Part
+      else
+        Normalized := Normalized + '-' + Part;
     end;
+
+    Result := WideString(Normalized);
+  finally
+    Parts.Free;
   end;
 end;
 
