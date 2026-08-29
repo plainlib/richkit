@@ -56,7 +56,7 @@ type
     procedure ApplyBidiMode;
 
     // Get full text height
-    function GetTextHeight(AText:string): integer;
+    function GetTextHeight(AText: string): integer;
 
     // Returns the free space below the text in the memo's client area.
     function GetBottomSpace: integer;
@@ -86,6 +86,9 @@ type
 
     // Assigns text while maintaining zoom factor
     procedure SetTextSafe(const AText: string);
+
+    // Clears memo content, creating an undo point so the operation can be undone
+    procedure ClearWithUndo;
   end;
 
 implementation
@@ -637,7 +640,7 @@ begin
   {$ENDIF}
 end;
 
-function TRichMemoHelper.GetTextHeight(AText:string): integer;
+function TRichMemoHelper.GetTextHeight(AText: string): integer;
 var
   Bmp: Graphics.TBitmap;
   TextRect: TRect;
@@ -1054,6 +1057,27 @@ begin
   ZoomFactor := Self.ZoomFactor;
   Self.Text := AText;
   Self.ZoomFactor := ZoomFactor;
+end;
+
+procedure TRichMemoHelper.ClearWithUndo;
+var
+  TextLen: integer;
+begin
+  if Self.Text = '' then Exit;
+
+  // Calculate text length in characters because SelLength expects character count
+  TextLen := UTF8Length(Self.Text);
+
+  // Select all text
+  Self.SelStart := 0;
+  Self.SelLength := TextLen;
+
+  // Replacing selection with empty string creates an undo point
+  Self.SelText := '';
+
+  // Move cursor to the beginning
+  Self.SelStart := 0;
+  Self.SelLength := 0;
 end;
 
 end.
