@@ -11,7 +11,7 @@ unit RichSpellChecker;
 interface
 
 uses
-  Classes, SysUtils, Menus, Graphics, Types,
+  Classes, SysUtils, Menus, Graphics, Types, ExtCtrls,
   {$IFDEF WINDOWS}
   RichMemoHelper,
   {$ELSE}
@@ -43,11 +43,24 @@ type
     FApplyImmediately: boolean;
     FContextCaretPos: integer; // caret position when context menu was invoked
     FUpdateLock: integer; // blocks context menu while updates are in progress
+    FTargetPopupMenu: TPopupMenu; // external popup menu to host replacements
+    FInjectedItems: TList; // dynamically added menu items for later removal
+    FSubMenu: Boolean; // if True, create a submenu for suggestions
+    FSubMenuCaption: string; // caption of the submenu
+    FSubMenuIndex: Integer; // insertion index in the popup menu
+    FIsShowingOurMenu: Boolean; // indicates the popup was opened by our ShowContextMenu
+    FOriginalPopupOnPopup: TNotifyEvent; // saved original OnPopup handler
+    FOriginalPopupOnClose: TNotifyEvent; // saved original OnClose handler
+    FTimer: TTimer; // delayed cleanup timer
     function GetErrorAtTextPos(ATextPos: integer): PSpellError;
     procedure ApplyUnderlineToError(AError: PSpellError);
     procedure ClearUnderlines;
     procedure ReplacementClick(Sender: TObject);
     function GetCharIndexAtPos(X, Y: integer): integer;
+    procedure ClearInjectedItems;
+    procedure SetTargetPopupMenu(const AValue: TPopupMenu);
+    procedure PopupCloseHandler(Sender: TObject);
+    procedure TimerHandler(Sender: TObject);
   public
     constructor Create(ARichMemo: TRichMemo);
     destructor Destroy; override;
@@ -61,6 +74,10 @@ type
     // Remove a single error from the list and clear its underline
     procedure RemoveError(AError: PSpellError; ANewLength: integer);
     property OnSpellCheckNeeded: TNotifyEvent read FOnSpellCheckNeeded write FOnSpellCheckNeeded;
+    property PopupMenu: TPopupMenu read FTargetPopupMenu write SetTargetPopupMenu;
+    property SubMenu: Boolean read FSubMenu write FSubMenu default False;
+    property SubMenuCaption: string read FSubMenuCaption write FSubMenuCaption;
+    property SubMenuIndex: Integer read FSubMenuIndex write FSubMenuIndex default 0;
   end;
 
 implementation
@@ -144,14 +161,41 @@ begin
   FRichMemo := ARichMemo;
   FMenu := TPopupMenu.Create(nil);
   FErrors := TList.Create;
+  FInjectedItems := TList.Create;
   FCurrentError := nil;
   FApplyImmediately := True;
   FContextCaretPos := -1;
   FUpdateLock := 0;
+  FTargetPopupMenu := nil;
+  FSubMenu := False;
+  FSubMenuCaption := 'Suggestions';
+  FSubMenuIndex := 0;
+  FIsShowingOurMenu := False;
+  FOriginalPopupOnPopup := nil;
+  FOriginalPopupOnClose := nil;
+
+  FTimer := TTimer.Create(nil);
+  FTimer.Enabled := False;
+  FTimer.Interval := 100; // 100 ms delay before cleanup
+  FTimer.OnTimer := @TimerHandler;
 end;
 
 destructor TRichSpellChecker.Destroy;
 begin
+  // Stop timer and cleanup
+  FTimer.Enabled := False;
+
+  // Restore original event handlers if our popup is still attached
+  if FIsShowingOurMenu and (FTargetPopupMenu <> nil) then
+  begin
+    FTargetPopupMenu.OnPopup := FOriginalPopupOnPopup;
+    FTargetPopupMenu.OnClose := FOriginalPopupOnClose;
+    FIsShowingOurMenu := False;
+  end;
+
+  ClearInjectedItems;
+  FreeAndNil(FTimer);
+  FreeAndNil(FInjectedItems);
   Clear;
   FreeAndNil(FMenu);
   FreeAndNil(FErrors);
@@ -450,6 +494,73 @@ begin
   {$ENDIF}
 end;
 
+procedure TRichSpellChecker.ClearInjectedItems;
+var
+  i: integer;
+  Item: TMenuItem;
+begin
+  for i := FInjectedItems.Count - 1 downto 0 do
+  begin
+    Item := TMenuItem(FInjectedItems[i]);
+    // Remove from its parent (if any)
+    if Assigned(Item.Parent) then
+      Item.Parent.Remove(Item)
+    else if Assigned(Item.Menu) then
+      Item.Menu.Items.Remove(Item);
+    // Free the item and its children (if any)
+    Item.Free;
+  end;
+  FInjectedItems.Clear;
+end;
+
+procedure TRichSpellChecker.SetTargetPopupMenu(const AValue: TPopupMenu);
+begin
+  if FTargetPopupMenu <> AValue then
+  begin
+    // Stop pending cleanup timer
+    FTimer.Enabled := False;
+
+    // Restore original handlers if attached to the old menu
+    if FIsShowingOurMenu and (FTargetPopupMenu <> nil) then
+    begin
+      FTargetPopupMenu.OnPopup := FOriginalPopupOnPopup;
+      FTargetPopupMenu.OnClose := FOriginalPopupOnClose;
+      FIsShowingOurMenu := False;
+    end;
+
+    ClearInjectedItems;
+    FTargetPopupMenu := AValue;
+    FOriginalPopupOnPopup := nil;
+    FOriginalPopupOnClose := nil;
+    FIsShowingOurMenu := False;
+  end;
+end;
+
+procedure TRichSpellChecker.PopupCloseHandler(Sender: TObject);
+begin
+  if FIsShowingOurMenu then
+  begin
+    FIsShowingOurMenu := False;
+    // Restore original handlers
+    FTargetPopupMenu.OnPopup := FOriginalPopupOnPopup;
+    FTargetPopupMenu.OnClose := FOriginalPopupOnClose;
+    FOriginalPopupOnPopup := nil;
+    FOriginalPopupOnClose := nil;
+    // Start delayed cleanup to allow OnClick of menu items to process
+    FTimer.Enabled := False;
+    FTimer.Enabled := True;
+    // Call the original OnClose handler if it was assigned
+    if Assigned(FTargetPopupMenu.OnClose) then
+      FTargetPopupMenu.OnClose(Sender);
+  end;
+end;
+
+procedure TRichSpellChecker.TimerHandler(Sender: TObject);
+begin
+  FTimer.Enabled := False;
+  ClearInjectedItems;
+end;
+
 function TRichSpellChecker.ShowContextMenu(X, Y: integer): boolean;
 var
   CharIndex: integer;
@@ -457,6 +568,8 @@ var
   Item: TMenuItem;
   i: integer;
   ScreenPoint: TPoint;
+  InsertIndex: integer;
+  SMenu: TMenuItem;
 begin
   Result := False;
   if not Assigned(FRichMemo) then
@@ -477,24 +590,84 @@ begin
   // Save caret position for later restore after replacement
   FContextCaretPos := FRichMemo.SelStart;
 
-  // Clear previous menu items
-  FMenu.Items.Clear;
+  // Convert client coordinates to screen coordinates for Popup
+  ScreenPoint := FRichMemo.ClientToScreen(Types.Point(X, Y));
 
-  // Add new replacement items
-  for i := 0 to High(Error^.Replacements) do
+  // If external popup menu is set, insert items there
+  if FTargetPopupMenu <> nil then
   begin
-    Item := TMenuItem.Create(FMenu);
-    Item.Caption := Error^.Replacements[i];
-    Item.OnClick := @ReplacementClick;
-    FMenu.Items.Add(Item);
-  end;
+    // Ensure any pending cleanup is done before adding new items
+    FTimer.Enabled := False;
+    ClearInjectedItems;
 
-  if FMenu.Items.Count > 0 then
-  begin
-    // Convert client coordinates to screen coordinates for Popup
-    ScreenPoint := FRichMemo.ClientToScreen(Types.Point(X, Y));
-    FMenu.Popup(ScreenPoint.X, ScreenPoint.Y);
+    // Determine insertion index
+    InsertIndex := FSubMenuIndex;
+    if (InsertIndex < 0) or (InsertIndex > FTargetPopupMenu.Items.Count) then
+      InsertIndex := FTargetPopupMenu.Items.Count; // append to end if out of range
+
+    if FSubMenu then
+    begin
+      // Create SMenu with caption
+      SMenu := TMenuItem.Create(FTargetPopupMenu);
+      SMenu.Caption := FSubMenuCaption;
+      // Add replacement items to SMenu
+      for i := 0 to High(Error^.Replacements) do
+      begin
+        Item := TMenuItem.Create(SMenu);
+        Item.Caption := Error^.Replacements[i];
+        Item.OnClick := @ReplacementClick;
+        SMenu.Add(Item);
+      end;
+      // Insert SMenu at specified index
+      FTargetPopupMenu.Items.Insert(InsertIndex, SMenu);
+      // Remember only the SMenu root for cleanup (children are freed automatically)
+      FInjectedItems.Add(SMenu);
+    end
+    else
+    begin
+      // Insert replacement items directly at root
+      for i := 0 to High(Error^.Replacements) do
+      begin
+        Item := TMenuItem.Create(FTargetPopupMenu);
+        Item.Caption := Error^.Replacements[i];
+        Item.OnClick := @ReplacementClick;
+        FTargetPopupMenu.Items.Insert(InsertIndex + i, Item);
+        FInjectedItems.Add(Item);
+      end;
+      // Add a separator after the items
+      Item := TMenuItem.Create(FTargetPopupMenu);
+      Item.Caption := '-';
+      FTargetPopupMenu.Items.Insert(InsertIndex + High(Error^.Replacements) + 1, Item);
+      FInjectedItems.Add(Item);
+    end;
+
+    // Save original event handlers and assign ours to manage cleanup timing
+    FOriginalPopupOnPopup := FTargetPopupMenu.OnPopup;
+    FOriginalPopupOnClose := FTargetPopupMenu.OnClose;
+    FTargetPopupMenu.OnPopup := nil; // we don't need OnPopup for cleanup now
+    FTargetPopupMenu.OnClose := @PopupCloseHandler;
+    FIsShowingOurMenu := True;
+
+    // Show the external popup menu
+    FTargetPopupMenu.Popup(ScreenPoint.X, ScreenPoint.Y);
     Result := True;
+  end
+  else
+  begin
+    // Use own internal popup menu (default behavior)
+    FMenu.Items.Clear;
+    for i := 0 to High(Error^.Replacements) do
+    begin
+      Item := TMenuItem.Create(FMenu);
+      Item.Caption := Error^.Replacements[i];
+      Item.OnClick := @ReplacementClick;
+      FMenu.Items.Add(Item);
+    end;
+    if FMenu.Items.Count > 0 then
+    begin
+      FMenu.Popup(ScreenPoint.X, ScreenPoint.Y);
+      Result := True;
+    end;
   end;
 end;
 
