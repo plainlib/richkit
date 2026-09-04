@@ -9,7 +9,7 @@ interface
 
 uses
   ClipToHtml, HtmlToRtf, RichMemoHelper, RichSpellChecker, RtfToHtml, 
-  SpellUtils, WinSpellChecker;
+  SpellUtils, WinSpellChecker, RichMemoCellEditor, HunSpellChecker;
 
 implementation
 

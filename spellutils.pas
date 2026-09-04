@@ -18,21 +18,31 @@ uses
   {$IFDEF WINDOWS}
   WinSpellChecker,
   {$ENDIF}
-  RichSpellChecker;
+  RichSpellChecker,
+  HunSpellChecker;
 
 type
   TSpell = class
   public
-    // Checks the text of a RichMemo for spelling and/or grammar errors and applies wavy underlines
+    // Checks the text of a RichMemo for spelling and/or grammar errors and applies wavy underlines (Windows only)
     class function WinCheck(ARichMemo: TRichMemo; ASpellChecker: TRichSpellChecker; const ALanguage: string;
       AOptions: TSpellCheckOptions = [scoSpelling]; AAddEmptySuggestions: boolean = True): boolean; static;
 
-    // Returns a list of all available spell checker language tags in BCP-47 format
+    // Checks the text of a RichMemo using HunSpell engine and applies underlines
+    class function HunCheck(ARichMemo: TRichMemo; ASpellChecker: TRichSpellChecker;
+      AHunSpellChecker: THunSpellChecker; AOptions: TSpellCheckOptions = [scoSpelling];
+      AAddEmptySuggestions: boolean = True): boolean; static;
+
+    // Returns a list of all available spell checker language tags in BCP-47 format (Windows only)
     class function WinSupportedLanguages: TStrings; static;
 
-    // Checks plain text and returns an array of spell error items without touching GUI
+    // Checks plain text with Windows engine and returns an array of spell error items
     class function CheckText(const AText: string; const ALanguage: string; AOptions: TSpellCheckOptions = [scoSpelling];
       AAddEmptySuggestions: boolean = True): RichSpellChecker.TSpellErrorArray; static;
+
+    // Checks plain text with HunSpell engine and returns an array of spell error items
+    class function HunCheckText(const AText: string; AHunSpellChecker: THunSpellChecker;
+      AOptions: TSpellCheckOptions = [scoSpelling]; AAddEmptySuggestions: boolean = True): RichSpellChecker.TSpellErrorArray; static;
 
     // Applies a list of spell errors to the spell checker, replacing all existing underlines
     class procedure ApplyErrors(ASpellChecker: TRichSpellChecker; const AErrors: RichSpellChecker.TSpellErrorArray); static;
@@ -112,6 +122,71 @@ begin
     ASpellChecker.EndUpdate;
   end;
   {$ENDIF}
+end;
+
+class function TSpell.HunCheck(ARichMemo: TRichMemo; ASpellChecker: TRichSpellChecker;
+  AHunSpellChecker: THunSpellChecker; AOptions: TSpellCheckOptions = [scoSpelling];
+  AAddEmptySuggestions: boolean = True): boolean;
+var
+  Utf8Text: string;
+  HunErrors: HunSpellChecker.TSpellErrorArray = nil;
+  SuggestionList: array of string = nil;
+  i, j: integer;
+begin
+  Result := False;
+  if not Assigned(ARichMemo) or not Assigned(ASpellChecker) or not Assigned(AHunSpellChecker) then
+    Exit;
+
+  // If no options selected, clear previous underlines and exit
+  if AOptions = [] then
+  begin
+    ASpellChecker.BeginUpdate;
+    try
+      ASpellChecker.Clear;
+    finally
+      ASpellChecker.EndUpdate;
+    end;
+    Exit;
+  end;
+
+  // HunSpell only supports spelling, so if scoSpelling is not requested, clear and exit
+  if not (scoSpelling in AOptions) then
+  begin
+    ASpellChecker.BeginUpdate;
+    try
+      ASpellChecker.Clear;
+    finally
+      ASpellChecker.EndUpdate;
+    end;
+    Exit;
+  end;
+
+  Utf8Text := ARichMemo.Text;
+
+  // Run HunSpell check
+  HunErrors := AHunSpellChecker.CheckText(Utf8Text);
+
+  ASpellChecker.BeginUpdate;
+  try
+    ASpellChecker.Clear;
+    for i := 0 to High(HunErrors) do
+    begin
+      SetLength(SuggestionList, Length(HunErrors[i].Replacements));
+      for j := 0 to High(HunErrors[i].Replacements) do
+        SuggestionList[j] := HunErrors[i].Replacements[j];
+
+      if AAddEmptySuggestions or (Length(SuggestionList) > 0) then
+        ASpellChecker.AddError(
+          HunErrors[i].Offset,
+          HunErrors[i].Length,
+          HunErrors[i].Message,
+          SuggestionList,
+          HunErrors[i].Color);
+    end;
+    Result := True;
+  finally
+    ASpellChecker.EndUpdate;
+  end;
 end;
 
 class function TSpell.WinSupportedLanguages: TStrings;
@@ -194,6 +269,33 @@ begin
       Result[ResultIndex - 1].Replacements[j] := UTF8Encode(WinErrors[i].Suggestions[j]);
   end;
   {$ENDIF}
+end;
+
+class function TSpell.HunCheckText(const AText: string; AHunSpellChecker: THunSpellChecker;
+  AOptions: TSpellCheckOptions = [scoSpelling]; AAddEmptySuggestions: boolean = True): RichSpellChecker.TSpellErrorArray;
+var
+  HunErrors: HunSpellChecker.TSpellErrorArray = nil;
+  i: integer;
+begin
+  Result := nil;
+  if not Assigned(AHunSpellChecker) then Exit;
+  if AOptions = [] then Exit;
+  if not (scoSpelling in AOptions) then Exit;
+
+  HunErrors := AHunSpellChecker.CheckText(AText);
+
+  SetLength(Result, Length(HunErrors));
+  for i := 0 to High(HunErrors) do
+  begin
+    if not AAddEmptySuggestions and (Length(HunErrors[i].Replacements) = 0) then
+      Continue;
+
+    Result[i].Offset := HunErrors[i].Offset;
+    Result[i].Length := HunErrors[i].Length;
+    Result[i].Message := HunErrors[i].Message;
+    Result[i].Replacements := HunErrors[i].Replacements;
+    Result[i].Color := HunErrors[i].Color;
+  end;
 end;
 
 class procedure TSpell.ApplyErrors(ASpellChecker: TRichSpellChecker; const AErrors: RichSpellChecker.TSpellErrorArray);

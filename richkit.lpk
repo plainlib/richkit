@@ -72,6 +72,14 @@ SOFTWARE."/>
         <Filename Value="winspellchecker.pas"/>
         <UnitName Value="WinSpellChecker"/>
       </Item>
+      <Item>
+        <Filename Value="richmemocelleditor.pas"/>
+        <UnitName Value="richmemocelleditor"/>
+      </Item>
+      <Item>
+        <Filename Value="hunspellchecker.pas"/>
+        <UnitName Value="hunspellchecker"/>
+      </Item>
     </Files>
     <RequiredPkgs>
       <Item>
