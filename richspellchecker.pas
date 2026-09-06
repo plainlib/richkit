@@ -45,10 +45,10 @@ type
     FUpdateLock: integer; // blocks context menu while updates are in progress
     FTargetPopupMenu: TPopupMenu; // external popup menu to host replacements
     FInjectedItems: TList; // dynamically added menu items for later removal
-    FSubMenu: Boolean; // if True, create a submenu for suggestions
+    FSubMenu: boolean; // if True, create a submenu for suggestions
     FSubMenuCaption: string; // caption of the submenu
-    FSubMenuIndex: Integer; // insertion index in the popup menu
-    FIsShowingOurMenu: Boolean; // indicates the popup was opened by our ShowContextMenu
+    FSubMenuIndex: integer; // insertion index in the popup menu
+    FIsShowingOurMenu: boolean; // indicates the popup was opened by our ShowContextMenu
     FOriginalPopupOnPopup: TNotifyEvent; // saved original OnPopup handler
     FOriginalPopupOnClose: TNotifyEvent; // saved original OnClose handler
     FTimer: TTimer; // delayed cleanup timer
@@ -75,9 +75,9 @@ type
     procedure RemoveError(AError: PSpellError; ANewLength: integer);
     property OnSpellCheckNeeded: TNotifyEvent read FOnSpellCheckNeeded write FOnSpellCheckNeeded;
     property PopupMenu: TPopupMenu read FTargetPopupMenu write SetTargetPopupMenu;
-    property SubMenu: Boolean read FSubMenu write FSubMenu default False;
+    property SubMenu: boolean read FSubMenu write FSubMenu default False;
     property SubMenuCaption: string read FSubMenuCaption write FSubMenuCaption;
-    property SubMenuIndex: Integer read FSubMenuIndex write FSubMenuIndex default 0;
+    property SubMenuIndex: integer read FSubMenuIndex write FSubMenuIndex default 0;
   end;
 
 implementation
@@ -391,6 +391,10 @@ var
   i: integer;
   scrollPos: TPoint;
   OldSelStart, OldSelLength: integer;
+{$ELSE}
+var
+  i: integer;
+  OldSelStart, OldSelLength: integer;
 {$ENDIF}
 begin
   {$IFDEF WINDOWS}
@@ -428,6 +432,18 @@ begin
   finally
     FRichMemo.ResumeUndo;
   end;
+  {$ELSE}
+  if not Assigned(FRichMemo) then
+    Exit;
+
+  OldSelStart := FRichMemo.SelStart;
+  OldSelLength := FRichMemo.SelLength;
+
+  for i := 0 to FErrors.Count - 1 do
+    ApplyUnderlineToError(PSpellError(FErrors[i]));
+
+  FRichMemo.SelStart := OldSelStart;
+  FRichMemo.SelLength := OldSelLength;
   {$ENDIF}
 end;
 
@@ -449,13 +465,9 @@ begin
 end;
 
 function TRichSpellChecker.GetCharIndexAtPos(X, Y: integer): integer;
-var
   {$IFDEF WINDOWS}
+var
   Pt: TPoint;
-  {$ELSE}
-  ClientX: integer;
-  CharWidth: integer;
-  ClientRect: TRect;
   {$ENDIF}
 begin
   {$IFDEF WINDOWS}
@@ -474,23 +486,10 @@ begin
   if Result < 0 then
     Result := -1;
   {$ELSE}
-  if not Assigned(FRichMemo) then
-    Exit(-1);
+  Result := -1;
+  if not Assigned(FRichMemo) then Exit;
 
-  ClientX := X;
-  ClientRect := FRichMemo.ClientRect;
-
-  if (ClientX < ClientRect.Left) or (ClientX > ClientRect.Right) then
-    Exit(-1);
-
-  CharWidth := Round(FRichMemo.Font.Size * 0.6);
-  if CharWidth = 0 then
-    CharWidth := 8;
-
-  Result := (ClientX - ClientRect.Left) div CharWidth;
-
-  if Result > Length(FRichMemo.Text) then
-    Result := -1;
+  Result := FRichMemo.CharAtPos(X, Y);
   {$ENDIF}
 end;
 

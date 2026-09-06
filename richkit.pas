@@ -8,8 +8,8 @@ unit richkit;
 interface
 
 uses
-  ClipToHtml, HtmlToRtf, RichMemoHelper, RichSpellChecker, RtfToHtml, 
-  SpellUtils, WinSpellChecker, RichMemoCellEditor, HunSpellChecker;
+  RichMemoCellEditor, ClipToHtml, HtmlToRtf, RichMemoHelper, RichSpellChecker, 
+  RtfToHtml, SpellUtils, WinSpellChecker, HunSpellChecker;
 
 implementation
 
