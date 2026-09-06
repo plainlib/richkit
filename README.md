@@ -1,10 +1,28 @@
-# Integrating Spell Checking with RichKit (Windows)
+# Integrating Spell Checking with RichKit
 
-This guide explains how to add spell checking to your Delphi/Lazarus application using the **RichKit** package modules (`RichSpellChecker`, `SpellUtils`, `WinSpellChecker`). The implementation relies on the native Windows Spell Checker API (Windows 8+).
+For a simplified integration, you can use the non‑visual `TSpellChecker` component from the [DesignKit](https://github.com/plainlib/designkit) package. It provides a ready-to-use drop-in solution that handles the spell checker lifecycle and event wiring, so you can focus on your application logic.
 
 ![SpellCheckSample](samples/sample-spellcheck.png)  
 
-## Dependencies
+## Requirements
+
+- **Lazarus** (tested with 4.8) / **Free Pascal Compiler** 3.2.2 or newer.
+- **LCLBase** – included with Lazarus.
+- **[RichMemoPackage](https://github.com/plainlib/richmemo)** – extended `TRichMemo` component with clipboard and undo helpers (available in the [plainlib](https://github.com/plainlib) repository).
+- **[Helpers](https://github.com/plainlib/helpers)** – common utility units used by the spell‑checker (also available in plainlib).
+- **Windows 8 or later** is required only for the native `WinSpellChecker` backend. The **HunSpell** backend works on all platforms (Windows, Linux, macOS) and does not need any OS‑specific API.
+- Optionally, you can use the non‑visual **[TSpellChecker](https://github.com/plainlib/designkit)** component from [DesignKit](https://github.com/plainlib/designkit) for an even simpler drop‑in integration.
+
+This guide explains how to add spell checking to your Delphi/Lazarus application using the **RichKit** package modules (`RichSpellChecker`, `SpellUtils`). Two backends are supported:
+
+- **Windows Spell Checker** (native, Windows 8+) – uses the OS spell‑check API, supports multiple languages, and provides comprehensive spelling/grammar checks.
+- **HunSpell** (cross‑platform) – a pure Object Pascal implementation of the Hunspell engine. Works on Windows, Linux, and macOS. Requires Hunspell dictionary files (`.aff` + `.dic`).
+
+Both backends share the same `TRichSpellChecker` interface for underlining errors and displaying suggestion menus.
+
+## Using Windows Spell Checker (Native)
+
+### Dependencies
 
 - Windows operating system (Windows 8 or later recommended)
 - Lazarus / Delphi with support for COM interfaces
@@ -14,7 +32,7 @@ This guide explains how to add spell checking to your Delphi/Lazarus application
   - `WinSpellChecker`
   - `RichMemo` (or `TRichMemo` component)
 
-## Setup
+### Setup
 
 1. **Add the units to your form’s `uses` clause.**
 
@@ -54,9 +72,9 @@ begin
 end;
 ```
 
-## Performing a Spell Check
+### Performing a Spell Check
 
-### Synchronous Check (Blocking)
+#### Synchronous Check (Blocking)
 
 ```pascal
 procedure TYourForm.CheckSpellingNow;
@@ -69,7 +87,7 @@ begin
 end;
 ```
 
-### Asynchronous Check (Non-blocking)
+#### Asynchronous Check (Non-blocking)
 
 For better UI responsiveness, run the check in a background thread. Use `TSpell.CheckText` to obtain error data without touching the GUI, then apply it via `TSpell.ApplyErrors` in the main thread.
 
@@ -106,7 +124,7 @@ begin
 end;
 ```
 
-## Showing Context Menu (Suggestions)
+### Showing Context Menu (Suggestions)
 
 Intercept the `OnContextPopup` event of the `TRichMemo`:
 
@@ -124,7 +142,7 @@ end;
 
 The method returns `True` if a menu was shown; otherwise, you may show your own context menu.
 
-## Clearing Underlines
+### Clearing Underlines
 
 To clear all spell underlines manually:
 
@@ -132,12 +150,134 @@ To clear all spell underlines manually:
 FSpellChecker.Clear;
 ```
 
-## Important Notes
+### Important Notes
 
 - **Language Support**: Not all languages are installed by default. Use `TSpell.WinSupportedLanguages` to get a list of available BCP-47 tags.
 - **Undo/Redo**: The `TRichSpellChecker` uses `SuspendUndo`/`ResumeUndo` (Windows-specific) to prevent formatting changes from being recorded in the undo history. Make sure your `TRichMemo` helper provides these methods.
 - **Performance**: For long texts, consider limiting the check to visible text or using a debounce timer as shown above.
 - **Comprehensive Spelling**: Pass `[scoSpelling, scoComprehensiveSpelling]` to include grammar/style checks (available in some Windows versions).
+
+---
+
+## Using HunSpell for Cross-Platform Spell Checking
+
+The `HunSpellChecker` unit provides a pure Object Pascal implementation of the Hunspell spell‑checking engine. Unlike the Windows Spell Checker, it works on all platforms (Windows, Linux, macOS) and does not rely on OS‑specific APIs. It requires Hunspell dictionary files (`.aff` and `.dic`) which can be obtained from various sources (e.g., OpenOffice, LibreOffice, or directly from Hunspell projects).
+
+### Dependencies
+
+- No special OS requirements – works on Windows, Linux, macOS.
+- Units:
+  - `HunSpellChecker`
+  - `RichSpellChecker`
+  - `SpellUtils`
+  - `RichMemo` (or `TRichMemo` component)
+- Hunspell dictionary files (`.aff` and `.dic`) for the desired language(s). You can obtain them from:
+  - [LibreOffice dictionaries](https://github.com/LibreOffice/dictionaries)
+  - [Hunspell project](https://github.com/hunspell/hunspell/tree/master/tests)
+  - Various open-source repositories
+
+### Main Features
+
+- Load dictionaries from streams or files.
+- Check words, entire texts, and get suggestions.
+- Supports affix rules (prefixes, suffixes), compounding, break patterns, and REP/MAP tables.
+- Works with UTF‑8 strings.
+- Integrated with `TRichSpellChecker` via `TSpell.HunCheck` (same interface as the Windows checker).
+
+### Basic Usage
+
+```pascal
+uses
+  HunSpellChecker, RichSpellChecker, SpellUtils;
+
+var
+  HunChecker: THunSpellChecker;
+  RichChecker: TRichSpellChecker;
+begin
+  HunChecker := THunSpellChecker.Create;
+  try
+    // Load dictionary files
+    if HunChecker.LoadFromFiles('en_US.aff', 'en_US.dic') then
+    begin
+      // Check a single word
+      if HunChecker.CheckWord('example') then
+        ShowMessage('Correct')
+      else
+        ShowMessage('Misspelled');
+
+      // Get suggestions
+      var Suggestions := HunChecker.Suggest('exmple');
+      // Suggestions is an array of strings
+
+      // Integrate with RichMemo
+      RichChecker := TRichSpellChecker.Create(RichMemo1);
+      TSpell.HunCheck(RichMemo1, RichChecker, HunChecker, [scoSpelling], True);
+    end;
+  finally
+    HunChecker.Free;
+  end;
+end;
+```
+
+### Loading from Streams
+
+You can also load dictionaries from in‑memory streams (e.g., from resources):
+
+```pascal
+var
+  AFFStream, DICStream: TStream;
+begin
+  AFFStream := TResourceStream.Create(HInstance, 'EN_US_AFF', RT_RCDATA);
+  DICStream := TResourceStream.Create(HInstance, 'EN_US_DIC', RT_RCDATA);
+  try
+    HunChecker.LoadFromStream(AFFStream, DICStream);
+  finally
+    AFFStream.Free;
+    DICStream.Free;
+  end;
+end;
+```
+
+### Automatic Dictionary Discovery
+
+The helper function `HunspellDictionaryCandidates` returns an ordered list of possible dictionary names (without extension) for a given BCP‑47 language code. This can be used to search for dictionary files in a directory:
+
+```pascal
+var
+  Candidates: TStringArray;
+  Lang: string;
+  i: Integer;
+begin
+  Lang := 'en-GB';
+  Candidates := HunspellDictionaryCandidates(Lang);
+  // Candidates might be ['en_GB', 'en_GB-oed', 'en', ...]
+  for i := 0 to High(Candidates) do
+    if FileExists('dicts\' + Candidates[i] + '.dic') then
+    begin
+      HunChecker.LoadFromFiles('dicts\' + Candidates[i] + '.aff',
+                               'dicts\' + Candidates[i] + '.dic');
+      Break;
+    end;
+end;
+```
+
+### Integration with TRichSpellChecker
+
+Use `TSpell.HunCheck` just like `TSpell.WinCheck` – it fills the `TRichSpellChecker` with underlined errors and suggestions. The only difference is that you pass a `THunSpellChecker` instance instead of a language tag.
+
+```pascal
+procedure TForm1.DoSpellCheck;
+begin
+  // Same as WinCheck but with HunChecker
+  TSpell.HunCheck(RichMemo1, FSpellChecker, FHunChecker, [scoSpelling], True);
+end;
+```
+
+### Notes
+
+- Hunspell dictionaries are typically named like `en_US.aff`/`en_US.dic` or `en_GB.aff`/`en_GB.dic`. The function `HunspellDictionaryCandidates` helps to locate the most appropriate variant.
+- The checker supports most Hunspell features including affix flags, compound words, BREAK rules, REP and MAP tables, and ICONV conversions.
+- Performance is suitable for real‑time checking; for very large texts, consider using a background thread (see `OneShotThread`).
 
 ---
 

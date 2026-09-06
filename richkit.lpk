@@ -41,6 +41,10 @@ SOFTWARE."/>
     <Version Major="1"/>
     <Files>
       <Item>
+        <Filename Value="richmemocelleditor.pas"/>
+        <UnitName Value="richmemocelleditor"/>
+      </Item>
+      <Item>
         <Filename Value="cliptohtml.pas"/>
         <UnitName Value="ClipToHtml"/>
       </Item>
@@ -71,10 +75,6 @@ SOFTWARE."/>
       <Item>
         <Filename Value="winspellchecker.pas"/>
         <UnitName Value="WinSpellChecker"/>
-      </Item>
-      <Item>
-        <Filename Value="richmemocelleditor.pas"/>
-        <UnitName Value="richmemocelleditor"/>
       </Item>
       <Item>
         <Filename Value="hunspellchecker.pas"/>
