@@ -108,8 +108,8 @@ type
     FKeyGroups: TStringList;       // KEY groups separated by '|'
     procedure LoadAFFFromStream(Stream: TStream);
     procedure LoadDICFromStream(Stream: TStream);
-    procedure LoadAFF(const FileName: string);
-    procedure LoadDIC(const FileName: string);
+    function LoadAFF(const FileName: string): boolean;
+    function LoadDIC(const FileName: string): boolean;
     procedure AddSuffixRule(const Flag: string; const Strip, Add, Condition: string; CrossProduct: boolean);
     procedure AddPrefixRule(const Flag: string; const Strip, Add, Condition: string; CrossProduct: boolean);
     function MatchesCondition(const Condition, word: string; IsPrefix: boolean): boolean;
@@ -153,14 +153,166 @@ type
   public
     constructor Create;
     destructor Destroy; override;
-    procedure LoadFromStream(AFFStream, DICStream: TStream);
-    procedure LoadFromFiles(const AFFFileName, DICFileName: string);
+    function LoadFromStream(AFFStream, DICStream: TStream): boolean;
+    function LoadFromFiles(const AFFFileName, DICFileName: string): boolean;
     function CheckWord(const word: string): boolean;
     function CheckText(const Text: string): TSpellErrorArray;
     function Suggest(const word: string): TStringArray;
   end;
 
+// Returns an ordered list of possible Hunspell dictionary file names (without extension)
+// for a given BCP-47 language code, e.g. 'en', 'en-GB', 'pt', 'pt-BR', 'be', 'sr-Latn'.
+// The list is ordered by priority: most specific/preferred first.
+function HunspellDictionaryCandidates(const Lang: string): TStringArray;
+
 implementation
+
+function HunspellDictionaryCandidates(const Lang: string): TStringArray;
+var
+  s, norm, base, preferred: string;
+  i: integer;
+  list: TStringList;
+begin
+  Result := nil;
+  s := Trim(Lang);
+  if s = '' then Exit;
+
+  // Normalize: replace '-' with '_' and keep allowed characters
+  norm := '';
+  for i := 1 to Length(s) do
+  begin
+    if s[i] = '-' then
+      norm := norm + '_'
+    else if (s[i] in ['a'..'z', 'A'..'Z', '0'..'9', '_']) then
+      norm := norm + s[i];
+  end;
+
+  list := TStringList.Create;
+  try
+    list.Duplicates := dupIgnore;
+    list.Sorted := False;
+
+    // Exact normalized form
+    list.Add(norm);
+
+    // If has region/script part, add base language
+    if Pos('_', norm) > 0 then
+    begin
+      base := Copy(norm, 1, Pos('_', norm) - 1);
+      list.Add(base);
+    end;
+
+    // Preferred mapping for short two-letter codes
+    if Length(norm) = 2 then
+    begin
+      case LowerCase(norm) of
+        'en': preferred := 'en_US';
+        'pt': preferred := 'pt_BR';
+        'zh': preferred := 'zh_CN';
+        'ar': preferred := 'ar';
+        'he': preferred := 'he_IL';
+        'el': preferred := 'el_GR';
+        'ja': preferred := 'ja_JP';
+        'ko': preferred := 'ko_KR';
+        'hi': preferred := 'hi_IN';
+        'vi': preferred := 'vi_VN';
+        'uk': preferred := 'uk_UA';
+        'cs': preferred := 'cs_CZ';
+        'da': preferred := 'da_DK';
+        'fi': preferred := 'fi_FI';
+        'nb': preferred := 'nb_NO';
+        'no': preferred := 'nb_NO';
+        'fa': preferred := 'fa_IR';
+        'ms': preferred := 'ms_MY';
+        'bn': preferred := 'bn_BD';
+        'ta': preferred := 'ta_IN';
+        'te': preferred := 'te_IN';
+        'mr': preferred := 'mr_IN';
+        'sw': preferred := 'sw_TZ';
+        'km': preferred := 'km_KH';
+        'lo': preferred := 'lo_LA';
+        'ne': preferred := 'ne_NP';
+        'si': preferred := 'si_LK';
+        'ka': preferred := 'ka_GE';
+        'hy': preferred := 'hy_AM';
+        'kk': preferred := 'kk_KZ';
+        'az': preferred := 'az_Latn_AZ';
+        'sq': preferred := 'sq_AL';
+        'be': preferred := 'be_BY';
+        'ru': preferred := 'ru_RU';
+        'de': preferred := 'de_DE';
+        'fr': preferred := 'fr';
+        'es': preferred := 'es_ES';
+        'it': preferred := 'it_IT';
+        'pl': preferred := 'pl_PL';
+        'tr': preferred := 'tr_TR';
+        'nl': preferred := 'nl_NL';
+        'sv': preferred := 'sv_SE';
+        'lt': preferred := 'lt';
+        'is': preferred := 'is';
+        'ca': preferred := 'ca';
+        'sr': preferred := 'sr';
+        'gl': preferred := 'gl_ES';
+        else
+          preferred := norm;
+      end;
+
+      if preferred <> norm then
+      begin
+        list.Insert(0, preferred);
+        // Add special variants
+        if preferred = 'fa_IR' then
+          list.Add('fa-IR');
+        if preferred = 'be_BY' then
+          list.Add('be-official');
+        if preferred = 'ca' then
+          list.Add('ca-valencia');
+        if preferred = 'sr' then
+          list.Add('sr-Latn');
+        if preferred = 'de_DE' then
+          list.Add('de_DE_frami');
+        if preferred = 'en_US' then
+          list.Add('en');
+      end;
+    end
+    else if (Length(norm) > 2) and (Pos('_', norm) > 0) then
+    begin
+      // Add hyphenated and suffixed variants for known cases
+      if norm = 'fa_IR' then
+        list.Add('fa-IR');
+      if norm = 'be_BY' then
+        list.Add('be-official');
+      if norm = 'ca_ES' then
+        list.Add('ca');
+      if norm = 'ca_ES_valencia' then
+        list.Add('ca-valencia');
+      if norm = 'de_DE' then
+        list.Add('de_DE_frami');
+      if norm = 'de_AT' then
+        list.Add('de_AT_frami');
+      if norm = 'de_CH' then
+        list.Add('de_CH_frami');
+      if norm = 'sr_Latn' then
+        list.Add('sr-Latn');
+      if norm = 'pt_PT' then
+        list.Add('pt');
+    end;
+
+    // If original input contained hyphen, add it as candidate
+    if Pos('-', s) > 0 then
+      list.Add(s);
+
+    // Remove empty strings
+    for i := list.Count - 1 downto 0 do
+      if list[i] = '' then list.Delete(i);
+
+    SetLength(Result, list.Count);
+    for i := 0 to list.Count - 1 do
+      Result[i] := list[i];
+  finally
+    list.Free;
+  end;
+end;
 
 procedure SplitBySpaces(const S: string; Fields: TStringList);
 var
@@ -771,68 +923,119 @@ begin
   Result := False;
 end;
 
-procedure THunSpellChecker.LoadFromStream(AFFStream, DICStream: TStream);
+function THunSpellChecker.LoadFromStream(AFFStream, DICStream: TStream): boolean;
 begin
-  // Reset dictionary-dependent state so the same checker can load another dictionary.
-  FWordCount := 0;
-  SetLength(FWords, 0);
-  SetLength(FAllWords, 0);
-  SetLength(FAllWordsFlags, 0);
-  SetLength(FAllWordsLower, 0);
-  SetLength(FAllWordsFirstChar, 0);
-  SetLength(FLengthBuckets, 0);
-  SetLength(FSuffixRules, 0);
-  SetLength(FPrefixRules, 0);
-  SetLength(FActiveFlags, 0);
-  SetLength(FIconvFrom, 0);
-  SetLength(FIconvTo, 0);
-  SetLength(FWordCharsCodes, 0);
-  SetLength(FCompoundRules, 0);
-  SetLength(FREPFrom, 0);
-  SetLength(FREPTo, 0);
-  SetLength(FAAliases, 0);
-  FBreakPatterns.Clear;
-  FKeyGroups.Clear;
-  FSuggestCache.Clear;
-  FFlagMode := 'ASCII';
-  FNoSuggestFlag := '';
-  FNeedAffixFlag := '';
-  FPseudoRootFlag := '';
-  FCircumfixFlag := '';
-  FForbiddenWordFlag := '';
-  FOnlyInCompoundFlag := '';
-  FCompoundMin := 0;
-  FAFCount := 0;
-  FCompoundFlag := '';
-  FCompoundBegin := '';
-  FCompoundMiddle := '';
-  FCompoundEnd := '';
-  FCompoundPermitFlag := '';
-  FCompoundForbidFlag := '';
-  FTryChars := '';
+  Result := False;
+  try
+    // Reset dictionary-dependent state so the same checker can load another dictionary.
+    FWordCount := 0;
+    SetLength(FWords, 0);
+    SetLength(FAllWords, 0);
+    SetLength(FAllWordsFlags, 0);
+    SetLength(FAllWordsLower, 0);
+    SetLength(FAllWordsFirstChar, 0);
+    SetLength(FLengthBuckets, 0);
+    SetLength(FSuffixRules, 0);
+    SetLength(FPrefixRules, 0);
+    SetLength(FActiveFlags, 0);
+    SetLength(FIconvFrom, 0);
+    SetLength(FIconvTo, 0);
+    SetLength(FWordCharsCodes, 0);
+    SetLength(FCompoundRules, 0);
+    SetLength(FREPFrom, 0);
+    SetLength(FREPTo, 0);
+    SetLength(FAAliases, 0);
+    FBreakPatterns.Clear;
+    FKeyGroups.Clear;
+    FSuggestCache.Clear;
+    FFlagMode := 'ASCII';
+    FNoSuggestFlag := '';
+    FNeedAffixFlag := '';
+    FPseudoRootFlag := '';
+    FCircumfixFlag := '';
+    FForbiddenWordFlag := '';
+    FOnlyInCompoundFlag := '';
+    FCompoundMin := 0;
+    FAFCount := 0;
+    FCompoundFlag := '';
+    FCompoundBegin := '';
+    FCompoundMiddle := '';
+    FCompoundEnd := '';
+    FCompoundPermitFlag := '';
+    FCompoundForbidFlag := '';
+    FTryChars := '';
 
-  FillDWord(FHashTable[0], FHashSize, $FFFFFFFF);
+    FillDWord(FHashTable[0], FHashSize, $FFFFFFFF);
 
-  LoadAFFFromStream(AFFStream);
-  LoadDICFromStream(DICStream);
-  BuildAllWordsArray;
+    LoadAFFFromStream(AFFStream);
+    LoadDICFromStream(DICStream);
+    BuildAllWordsArray;
+    Result := True;
+  except
+    // On error, reset to empty dictionary
+    FWordCount := 0;
+    SetLength(FWords, 0);
+    SetLength(FAllWords, 0);
+    SetLength(FAllWordsFlags, 0);
+    SetLength(FAllWordsLower, 0);
+    SetLength(FAllWordsFirstChar, 0);
+    SetLength(FLengthBuckets, 0);
+    SetLength(FSuffixRules, 0);
+    SetLength(FPrefixRules, 0);
+    SetLength(FActiveFlags, 0);
+    SetLength(FIconvFrom, 0);
+    SetLength(FIconvTo, 0);
+    SetLength(FWordCharsCodes, 0);
+    SetLength(FCompoundRules, 0);
+    SetLength(FREPFrom, 0);
+    SetLength(FREPTo, 0);
+    SetLength(FAAliases, 0);
+    FBreakPatterns.Clear;
+    FKeyGroups.Clear;
+    FSuggestCache.Clear;
+    FFlagMode := 'ASCII';
+    FNoSuggestFlag := '';
+    FNeedAffixFlag := '';
+    FPseudoRootFlag := '';
+    FCircumfixFlag := '';
+    FForbiddenWordFlag := '';
+    FOnlyInCompoundFlag := '';
+    FCompoundMin := 0;
+    FAFCount := 0;
+    FCompoundFlag := '';
+    FCompoundBegin := '';
+    FCompoundMiddle := '';
+    FCompoundEnd := '';
+    FCompoundPermitFlag := '';
+    FCompoundForbidFlag := '';
+    FTryChars := '';
+    FillDWord(FHashTable[0], FHashSize, $FFFFFFFF);
+    Result := False;
+  end;
 end;
 
-procedure THunSpellChecker.LoadFromFiles(const AFFFileName, DICFileName: string);
+function THunSpellChecker.LoadFromFiles(const AFFFileName, DICFileName: string): boolean;
 var
   AFFStream: TFileStream = nil;
   DICStream: TFileStream = nil;
 begin
-  AFFStream := TFileStream.Create(AFFFileName, fmOpenRead or fmShareDenyWrite);
+  Result := False;
+  if not FileExists(AFFFileName) or not FileExists(DICFileName) then
+    Exit;
   try
-    DICStream := TFileStream.Create(DICFileName, fmOpenRead or fmShareDenyWrite);
+    AFFStream := TFileStream.Create(AFFFileName, fmOpenRead or fmShareDenyWrite);
     try
-      LoadFromStream(AFFStream, DICStream);
+      DICStream := TFileStream.Create(DICFileName, fmOpenRead or fmShareDenyWrite);
+      try
+        Result := LoadFromStream(AFFStream, DICStream);
+      finally
+        DICStream.Free;
+      end;
     finally
-      DICStream.Free;
+      AFFStream.Free;
     end;
-  finally
-    AFFStream.Free;
+  except
+    Result := False;
   end;
 end;
 
@@ -1280,27 +1483,41 @@ begin
   end;
 end;
 
-procedure THunSpellChecker.LoadAFF(const FileName: string);
+function THunSpellChecker.LoadAFF(const FileName: string): boolean;
 var
   Stream: TFileStream = nil;
 begin
-  Stream := TFileStream.Create(FileName, fmOpenRead or fmShareDenyWrite);
+  Result := False;
+  if not FileExists(FileName) then Exit;
   try
-    LoadAFFFromStream(Stream);
-  finally
-    Stream.Free;
+    Stream := TFileStream.Create(FileName, fmOpenRead or fmShareDenyWrite);
+    try
+      LoadAFFFromStream(Stream);
+      Result := True;
+    finally
+      Stream.Free;
+    end;
+  except
+    Result := False;
   end;
 end;
 
-procedure THunSpellChecker.LoadDIC(const FileName: string);
+function THunSpellChecker.LoadDIC(const FileName: string): boolean;
 var
   Stream: TFileStream = nil;
 begin
-  Stream := TFileStream.Create(FileName, fmOpenRead or fmShareDenyWrite);
+  Result := False;
+  if not FileExists(FileName) then Exit;
   try
-    LoadDICFromStream(Stream);
-  finally
-    Stream.Free;
+    Stream := TFileStream.Create(FileName, fmOpenRead or fmShareDenyWrite);
+    try
+      LoadDICFromStream(Stream);
+      Result := True;
+    finally
+      Stream.Free;
+    end;
+  except
+    Result := False;
   end;
 end;
 
@@ -2379,6 +2596,76 @@ begin
   end;
 end;
 
+function THunSpellChecker.CheckText(const Text: string): TSpellErrorArray;
+var
+  Ptr: pchar;
+  CharLen: integer;
+  CharIndex: integer;
+  WordStartChar: integer;
+  WordLengthChars: integer;
+  InWord: boolean;
+  word: string;
+  Err: TSpellError;
+begin
+  Result := nil;
+  SetLength(Result, 0);
+  Ptr := PChar(Text);
+  CharIndex := 0;
+  InWord := False;
+  WordStartChar := 0;
+  WordLengthChars := 0;
+  while Ptr^ <> #0 do
+  begin
+    {$NOTES OFF}
+    CharLen := UTF8CodepointSize(Ptr);
+    {$NOTES ON}
+    if IsWordChar(Ptr, CharLen) then
+    begin
+      if not InWord then
+      begin
+        WordStartChar := CharIndex;
+        WordLengthChars := 0;
+        InWord := True;
+      end;
+      Inc(WordLengthChars);
+    end
+    else
+    begin
+      if InWord then
+      begin
+        word := UTF8Copy(Text, WordStartChar + 1, WordLengthChars);
+        if not CheckWord(word) then
+        begin
+          Err.Offset := WordStartChar;
+          Err.Length := WordLengthChars;
+          Err.Message := 'Unknown word';
+          Err.Replacements := Suggest(word);
+          Err.Color := clRed;
+          SetLength(Result, Length(Result) + 1);
+          Result[High(Result)] := Err;
+        end;
+        InWord := False;
+      end;
+    end;
+    Inc(Ptr, CharLen);
+    Inc(CharIndex);
+  end;
+  if InWord then
+  begin
+    word := UTF8Copy(Text, WordStartChar + 1, WordLengthChars);
+    if not CheckWord(word) then
+    begin
+      Err.Offset := WordStartChar;
+      Err.Length := WordLengthChars;
+      Err.Message := 'Unknown word';
+      Err.Replacements := Suggest(word);
+      Err.Color := clRed;
+      SetLength(Result, Length(Result) + 1);
+      Result[High(Result)] := Err;
+    end;
+  end;
+end;
+
 function THunSpellChecker.Suggest(const word: string): TStringArray;
 var
   CleanWord: string;
@@ -2453,76 +2740,6 @@ begin
   end;
   if CachedValue <> '' then
     FSuggestCache.Add(CleanWord + '=' + CachedValue);
-end;
-
-function THunSpellChecker.CheckText(const Text: string): TSpellErrorArray;
-var
-  Ptr: pchar;
-  CharLen: integer;
-  CharIndex: integer;
-  WordStartChar: integer;
-  WordLengthChars: integer;
-  InWord: boolean;
-  word: string;
-  Err: TSpellError;
-begin
-  Result := nil;
-  SetLength(Result, 0);
-  Ptr := PChar(Text);
-  CharIndex := 0;
-  InWord := False;
-  WordStartChar := 0;
-  WordLengthChars := 0;
-  while Ptr^ <> #0 do
-  begin
-    {$NOTES OFF}
-    CharLen := UTF8CodepointSize(Ptr);
-    {$NOTES ON}
-    if IsWordChar(Ptr, CharLen) then
-    begin
-      if not InWord then
-      begin
-        WordStartChar := CharIndex;
-        WordLengthChars := 0;
-        InWord := True;
-      end;
-      Inc(WordLengthChars);
-    end
-    else
-    begin
-      if InWord then
-      begin
-        word := UTF8Copy(Text, WordStartChar + 1, WordLengthChars);
-        if not CheckWord(word) then
-        begin
-          Err.Offset := WordStartChar;
-          Err.Length := WordLengthChars;
-          Err.Message := 'Unknown word';
-          Err.Replacements := Suggest(word);
-          Err.Color := clRed;
-          SetLength(Result, Length(Result) + 1);
-          Result[High(Result)] := Err;
-        end;
-        InWord := False;
-      end;
-    end;
-    Inc(Ptr, CharLen);
-    Inc(CharIndex);
-  end;
-  if InWord then
-  begin
-    word := UTF8Copy(Text, WordStartChar + 1, WordLengthChars);
-    if not CheckWord(word) then
-    begin
-      Err.Offset := WordStartChar;
-      Err.Length := WordLengthChars;
-      Err.Message := 'Unknown word';
-      Err.Replacements := Suggest(word);
-      Err.Color := clRed;
-      SetLength(Result, Length(Result) + 1);
-      Result[High(Result)] := Err;
-    end;
-  end;
 end;
 
 end.
