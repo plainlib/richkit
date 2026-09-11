@@ -239,13 +239,13 @@ begin
 end;
 
 procedure TRichSpellChecker.ClearUnderlines;
+{$IFDEF WINDOWS}
 var
   OldSelStart, OldSelLength: integer;
-  {$IFDEF WINDOWS}
   cf: CHARFORMAT2W;
   cr: CHARRANGE;
   scrollPos: TPoint;
-  {$ENDIF}
+{$ENDIF}
 begin
   {$IFDEF WINDOWS}
   if not Assigned(FRichMemo) then
@@ -303,16 +303,16 @@ begin
   if Length(FRichMemo.Text) = 0 then
     Exit;
 
-  // Save caret position
-  OldSelStart := FRichMemo.SelStart;
-  OldSelLength := FRichMemo.SelLength;
-
-  FRichMemo.SelStart := 0;
-  FRichMemo.SelLength := Length(FRichMemo.Text);
-  FRichMemo.SelAttributes.Style := FRichMemo.SelAttributes.Style - [fsUnderline];
-  // Restore caret position
-  FRichMemo.SelStart := OldSelStart;
-  FRichMemo.SelLength := OldSelLength;
+  FRichMemo.SetRangeParams(
+    0,
+    Length(FRichMemo.Text),
+    [tmm_Styles, tmm_Color],
+    '',
+    0,
+    clWindowText,
+    [],
+    [fsUnderline]
+    );
   {$ENDIF}
 end;
 
@@ -377,11 +377,16 @@ begin
   if not Assigned(FRichMemo) or (AError = nil) then
     Exit;
 
-  FRichMemo.SelStart := AError^.Offset;
-  FRichMemo.SelLength := AError^.Length;
-  FRichMemo.SelAttributes.Style := FRichMemo.SelAttributes.Style + [fsUnderline];
-  FRichMemo.SelAttributes.Color := AError^.Color;
-  FRichMemo.SelLength := 0;
+  FRichMemo.SetRangeParams(
+    AError^.Offset,
+    AError^.Length,
+    [tmm_Styles, tmm_Color],
+    '',
+    0,
+    AError^.Color,
+    [fsUnderline],
+    []
+    );
   {$ENDIF}
 end;
 
@@ -440,7 +445,11 @@ begin
   OldSelLength := FRichMemo.SelLength;
 
   for i := 0 to FErrors.Count - 1 do
+  begin
     ApplyUnderlineToError(PSpellError(FErrors[i]));
+    FRichMemo.SelStart := OldSelStart;
+    FRichMemo.SelLength := OldSelLength;
+  end;
 
   FRichMemo.SelStart := OldSelStart;
   FRichMemo.SelLength := OldSelLength;
