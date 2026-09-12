@@ -89,6 +89,9 @@ type
 
     // Clears memo content, creating an undo point so the operation can be undone
     procedure ClearWithUndo;
+
+    // Apply memo settings and related visual properties.
+    procedure UpdateState;
   end;
 
 implementation
@@ -1078,6 +1081,13 @@ begin
   // Move cursor to the beginning
   Self.SelStart := 0;
   Self.SelLength := 0;
+end;
+
+procedure TRichMemoHelper.UpdateState;
+begin
+  if not Self.Visible then Exit;
+  Self.SetLeftIndent;
+  Self.ApplyBidiMode;
 end;
 
 end.
