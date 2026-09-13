@@ -29,9 +29,8 @@ type
       AOptions: TSpellCheckOptions = [scoSpelling]; AAddEmptySuggestions: boolean = True): boolean; static;
 
     // Checks the text of a RichMemo using HunSpell engine and applies underlines
-    class function HunCheck(ARichMemo: TRichMemo; ASpellChecker: TRichSpellChecker;
-      AHunSpellChecker: THunSpellChecker; AOptions: TSpellCheckOptions = [scoSpelling];
-      AAddEmptySuggestions: boolean = True): boolean; static;
+    class function HunCheck(ARichMemo: TRichMemo; ASpellChecker: TRichSpellChecker; AHunSpellChecker: THunSpellChecker;
+      AOptions: TSpellCheckOptions = [scoSpelling]; AAddEmptySuggestions: boolean = True): boolean; static;
 
     // Returns a list of all available spell checker language tags in BCP-47 format (Windows only)
     class function WinSupportedLanguages: TStrings; static;
@@ -124,9 +123,8 @@ begin
   {$ENDIF}
 end;
 
-class function TSpell.HunCheck(ARichMemo: TRichMemo; ASpellChecker: TRichSpellChecker;
-  AHunSpellChecker: THunSpellChecker; AOptions: TSpellCheckOptions = [scoSpelling];
-  AAddEmptySuggestions: boolean = True): boolean;
+class function TSpell.HunCheck(ARichMemo: TRichMemo; ASpellChecker: TRichSpellChecker; AHunSpellChecker: THunSpellChecker;
+  AOptions: TSpellCheckOptions = [scoSpelling]; AAddEmptySuggestions: boolean = True): boolean;
 var
   Utf8Text: string;
   HunErrors: HunSpellChecker.TSpellErrorArray = nil;
