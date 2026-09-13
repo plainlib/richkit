@@ -269,12 +269,19 @@ begin
   // Retry in case the pending value could not be applied earlier
   ApplyPendingValue;
 
+  // F2 enters edit mode and selects the whole text
+  if GetKeyState(VK_F2) < 0 then
+  begin
+    SelectAll;
+    Exit;
+  end;
+
   if not HandleAllocated then
     Exit;
 
   if not FCellRectSet or (FGrid = nil) then
   begin
-    SelStart := Length(Text);
+    SelectAll;
     Exit;
   end;
 
@@ -305,7 +312,7 @@ begin
     end;
   end
   else
-    SelStart := Length(Text);
+    SelectAll;
 end;
 
 end.
