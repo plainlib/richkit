@@ -11,7 +11,7 @@ unit HunSpellChecker;
 interface
 
 uses
-  Classes, SysUtils, Graphics, Math, StrUtils, LazUTF8;
+  Classes, SysUtils, Graphics, Math, StrUtils, Character, LazUTF8;
 
 type
   TStringArray = array of string;
@@ -2070,10 +2070,10 @@ end;
 
 function THunSpellChecker.IsWordChar(Ch: pchar; CharLen: integer): boolean;
 var
-  CodePoint: cardinal;
-  i: integer;
+  CodePoint: cardinal = 0;
+  i: integer = 0;
 begin
-  CodePoint := 0;
+  // Decode the UTF-8 code point from the current character
   if CharLen = 1 then
     CodePoint := Ord(Ch^)
   else if CharLen = 2 then
@@ -2084,11 +2084,19 @@ begin
     CodePoint := ((Ord(Ch^) and $07) shl 18) or ((Ord((Ch + 1)^) and $3F) shl 12) or ((Ord((Ch + 2)^) and $3F) shl 6) or
       (Ord((Ch + 3)^) and $3F);
 
-  Result := (CodePoint >= Ord('A')) and (CodePoint <= Ord('Z')) or (CodePoint >= Ord('a')) and
-    (CodePoint <= Ord('z')) or (CodePoint >= Ord('0')) and (CodePoint <= Ord('9')) or (CodePoint = Ord('_')) or
-    (CodePoint >= $0410) and (CodePoint <= $044F) or (CodePoint = $0401) or (CodePoint = $0451);
-  if Result then Exit;
+  // Underscore is always treated as part of a word
+  if CodePoint = Ord('_') then
+    Exit(True);
 
+  // Use Unicode aware classification for characters in the Basic Multilingual Plane.
+  // This covers national alphabets such as Belarusian, Ukrainian, Greek, and others.
+  {$NOTES OFF}
+  if CodePoint <= $FFFF then
+    if TCharacter.IsLetterOrDigit(widechar(CodePoint)) then
+      Exit(True);
+  {$NOTES ON}
+
+  // Also accept characters explicitly listed in WORDCHARS from the affix file
   for i := 0 to High(FWordCharsCodes) do
     if FWordCharsCodes[i] = CodePoint then
       Exit(True);
