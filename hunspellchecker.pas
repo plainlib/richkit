@@ -277,31 +277,33 @@ begin
         'sk': preferred := 'sk_SK';
         'sl': preferred := 'sl_SI';
         'th': preferred := 'th_TH';
+        'zu': preferred := 'zu_ZA';
         else
           preferred := norm;
       end;
 
       if preferred <> norm then
-      begin
         list.Insert(0, preferred);
-        // Add special variants
-        if preferred = 'fa_IR' then
-          list.Add('fa-IR');
-        if preferred = 'be_BY' then
-          list.Add('be-official');
-        if preferred = 'ca' then
-          list.Add('ca-valencia');
-        if preferred = 'sr' then
-          list.Add('sr-Latn');
-        if preferred = 'de_DE' then
-          list.Add('de_DE_frami');
-        if preferred = 'en_US' then
-          list.Add('en');
-      end;
+
+      // Add special variants independently of the preferred/norm comparison
+      if preferred = 'fa_IR' then
+        list.Add('fa-IR');
+      if preferred = 'be_BY' then
+        list.Add('be-official');
+      if preferred = 'ca' then
+        list.Add('ca-valencia');
+      if preferred = 'sr' then
+        list.Add('sr-Latn');
+      if preferred = 'de_DE' then
+        list.Insert(0, 'de_DE_frami');
+      if preferred = 'en_US' then
+        list.Add('en');
     end
     else if (Length(norm) > 2) and (Pos('_', norm) > 0) then
     begin
-      // Add hyphenated and suffixed variants for known cases
+      // Add hyphenated and suffixed variants for known cases.
+      // Insert at the front when the base language would otherwise
+      // produce a URL for a different dictionary than the requested one.
       if norm = 'fa_IR' then
         list.Add('fa-IR');
       if norm = 'be_BY' then
@@ -309,7 +311,7 @@ begin
       if norm = 'ca_ES' then
         list.Add('ca');
       if norm = 'ca_ES_valencia' then
-        list.Add('ca-valencia');
+        list.Insert(0, 'ca-valencia');
       if norm = 'de_DE' then
         list.Add('de_DE_frami');
       if norm = 'de_AT' then
@@ -317,7 +319,7 @@ begin
       if norm = 'de_CH' then
         list.Add('de_CH_frami');
       if norm = 'sr_Latn' then
-        list.Add('sr-Latn');
+        list.Insert(0, 'sr-Latn');
       if norm = 'pt_PT' then
         list.Add('pt');
     end;
