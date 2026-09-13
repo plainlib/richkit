@@ -692,6 +692,14 @@ begin
   if FCurrentError = nil then
     Exit;
 
+  // If read-only mode, we don't do replacement
+  if not Assigned(FRichMemo) or FRichMemo.ReadOnly then
+  begin
+    FContextCaretPos := -1;
+    FCurrentError := nil;
+    Exit;
+  end;
+
   // Temporarily disable OnChange event to prevent reentrant spell checking
   OldOnChange := FRichMemo.OnChange;
   FRichMemo.OnChange := nil;
@@ -735,7 +743,7 @@ end;
 
 procedure TRichSpellChecker.ReplaceError(AError: PSpellError; const ANewText: string; NewCaretPos: integer);
 begin
-  if not Assigned(FRichMemo) or (AError = nil) then
+  if not Assigned(FRichMemo) or (AError = nil) or FRichMemo.ReadOnly then
     Exit;
 
   FRichMemo.SelStart := AError^.Offset;
