@@ -181,8 +181,6 @@ function HunspellDictionaryCandidates(const Lang: string): TStringArray;
 
 implementation
 
-function LevenshteinDistance(const S1, S2: string): integer; forward;
-
 function HunspellDictionaryCandidates(const Lang: string): TStringArray;
 var
   s, norm, base, preferred: string;
@@ -218,7 +216,7 @@ begin
     begin
       case LowerCase(norm) of
         'en': preferred := 'en_US';
-        'pt': preferred := 'pt_BR';
+        'pt': preferred := 'pt_PT';
         'zh': preferred := 'zh_CN';
         'ar': preferred := 'ar';
         'he': preferred := 'he_IL';
@@ -296,6 +294,7 @@ begin
       if preferred <> norm then
         list.Insert(0, preferred);
 
+      if preferred = 'pt_PT' then list.Add('pt_BR');
       if preferred = 'fa_IR' then list.Add('fa-IR');
       if preferred = 'be_BY' then list.Add('be-official');
       if preferred = 'ca' then list.Add('ca-valencia');
@@ -329,6 +328,8 @@ begin
     list.Free;
   end;
 end;
+
+function LevenshteinDistance(const S1, S2: string): integer; forward;
 
 procedure SplitBySpaces(const S: string; Fields: TStringList);
 var
