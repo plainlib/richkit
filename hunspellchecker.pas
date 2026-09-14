@@ -120,11 +120,13 @@ type
     FBreakPatterns: TStringList;
     FTryChars: string;
     FKeyGroups: TStringList;
+    FIgnoreChars: TStringArray;
     procedure LoadAFFFromStream(Stream: TStream);
     procedure LoadDICFromStream(Stream: TStream);
     function LoadAFF(const FileName: string): boolean;
     function LoadDIC(const FileName: string): boolean;
     function InternFlag(const S: string): integer;
+    function ParseFlagString(const FlagStr: string): TIntegerArray;
     procedure RehashFlags;
     procedure AddAffixGroup(var List: TAffixList; const Flag: integer; const Group: TAffixGroup);
     procedure AddSuffixRule(const Flag: integer; const Strip, Add, Condition: string; CrossProduct: boolean);
@@ -427,6 +429,16 @@ begin
   // and are not required for the currently supported dictionaries. The string is returned as is.
 end;
 
+function RemoveIgnoreChars(const S: string; const IgnoreChars: TStringArray): string;
+var
+  i: integer;
+begin
+  Result := S;
+  for i := 0 to High(IgnoreChars) do
+    if IgnoreChars[i] <> '' then
+      Result := StringReplace(Result, IgnoreChars[i], '', [rfReplaceAll]);
+end;
+
 function THunSpellChecker.StripComment(const S: string): string;
 var
   posHash: integer;
@@ -573,6 +585,70 @@ begin
 
   if FFlagCount * 10 > FFlagHashSize * 7 then
     RehashFlags;
+end;
+
+function THunSpellChecker.ParseFlagString(const FlagStr: string): TIntegerArray;
+var
+  i, startPos: integer;
+  s: string;
+  FlagList: TStringList;
+  j, FlagId: integer;
+begin
+  Result := nil;
+  if FlagStr = '' then Exit;
+  FlagList := TStringList.Create;
+  try
+    case FFlagMode of
+      'ASCII':
+        for j := 1 to Length(FlagStr) do
+          FlagList.Add(FlagStr[j]);
+      'UTF-8':
+      begin
+        s := FlagStr;
+        while s <> '' do
+        begin
+          FlagList.Add(UTF8Copy(s, 1, 1));
+          UTF8Delete(s, 1, 1);
+        end;
+      end;
+      'LONG':
+      begin
+        i := 1;
+        while i + 1 <= Length(FlagStr) do
+        begin
+          FlagList.Add(Copy(FlagStr, i, 2));
+          Inc(i, 2);
+        end;
+      end;
+      'NUM':
+      begin
+        i := 1;
+        while i <= Length(FlagStr) do
+        begin
+          while (i <= Length(FlagStr)) and (FlagStr[i] in [',', ' ', #9]) do Inc(i);
+          if i > Length(FlagStr) then Break;
+          startPos := i;
+          while (i <= Length(FlagStr)) and not (FlagStr[i] in [',', ' ', #9]) do Inc(i);
+          FlagList.Add(Copy(FlagStr, startPos, i - startPos));
+        end;
+      end;
+      else
+        for j := 1 to Length(FlagStr) do
+          FlagList.Add(FlagStr[j]);
+    end;
+
+    for j := 0 to FlagList.Count - 1 do
+    begin
+      FlagId := InternFlag(FlagList[j]);
+      if FlagId >= 0 then
+      begin
+        SetLength(Result, Length(Result) + 1);
+        Result[High(Result)] := FlagId;
+      end;
+    end;
+  finally
+    FlagList.Free;
+  end;
 end;
 
 // ---------------------------------------------------------------------------------
@@ -727,6 +803,7 @@ begin
   SetLength(FREPFrom, 0);
   SetLength(FREPTo, 0);
   SetLength(FMAPGroups, 0);
+  SetLength(FIgnoreChars, 0);
   SetLength(FCompoundRules, 0);
 
   FNoSuggestFlag := -1;
@@ -776,6 +853,7 @@ begin
   SetLength(FREPFrom, 0);
   SetLength(FREPTo, 0);
   SetLength(FMAPGroups, 0);
+  SetLength(FIgnoreChars, 0);
   SetLength(FCompoundRules, 0);
   SetLength(FAAliases, 0);
   FBreakPatterns.Free;
@@ -811,6 +889,7 @@ begin
     SetLength(FIconvFrom, 0);
     SetLength(FIconvTo, 0);
     SetLength(FWordCharsCodes, 0);
+    SetLength(FIgnoreChars, 0);
     SetLength(FCompoundRules, 0);
     SetLength(FREPFrom, 0);
     SetLength(FREPTo, 0);
@@ -863,6 +942,7 @@ begin
     SetLength(FIconvFrom, 0);
     SetLength(FIconvTo, 0);
     SetLength(FWordCharsCodes, 0);
+    SetLength(FIgnoreChars, 0);
     SetLength(FCompoundRules, 0);
     SetLength(FREPFrom, 0);
     SetLength(FREPTo, 0);
@@ -936,7 +1016,10 @@ var
   ChPtr: pchar = nil;
   CharLen: integer = 0;
   KeyStr: string = '';
-  AliasIds: TIntegerArray = nil;
+  AliasFlagStr: string = '';
+  SlashAdd: integer = 0;
+  IgnoreStr: string = '';
+  IgnoreChar: string = '';
 begin
   Lines := TStringList.Create;
   Parts := TStringList.Create;
@@ -948,9 +1031,9 @@ begin
     for i := 0 to Min(200, Lines.Count - 1) do
     begin
       Line := Trim(Lines[i]);
-      if (Length(Line) >= 4) and (Copy(Line, 1, 4) = 'SET ') then
+      if (Length(Line) >= 4) and (Copy(Line, 1, 3) = 'SET') and (Line[4] in [' ', #9]) then
       begin
-        FEncoding := Trim(Copy(Line, 5, MaxInt));
+        FEncoding := Trim(Copy(Line, 4, MaxInt));
         Break;
       end;
     end;
@@ -964,6 +1047,7 @@ begin
       Line := Trim(Line);
       Inc(LineIdx);
       if Line = '' then Continue;
+
       SplitBySpaces(Line, Parts);
       if Parts.Count = 0 then Continue;
       if Parts[0] = 'FLAG' then
@@ -986,10 +1070,10 @@ begin
             if Line = '' then Continue;
             SplitBySpaces(Line, Parts);
             if (Parts.Count > 0) and (Parts[0] = 'AF') then Parts.Delete(0);
-            SetLength(AliasIds, Parts.Count);
+            AliasFlagStr := '';
             for j := 0 to Parts.Count - 1 do
-              AliasIds[j] := InternFlag(Parts[j]);
-            FAAliases[i] := AliasIds;
+              AliasFlagStr := AliasFlagStr + Parts[j];
+            FAAliases[i] := ParseFlagString(AliasFlagStr);
             Inc(i);
           end;
         end;
@@ -1092,6 +1176,9 @@ begin
               Add := Parts[3];
               Condition := Parts[4];
               if Strip = '0' then Strip := '';
+              // Drop the continuation flags that follow a '/' in the add string
+              SlashAdd := Pos('/', Add);
+              if SlashAdd > 0 then Add := Copy(Add, 1, SlashAdd - 1);
               if Add = '0' then Add := '';
               AddSuffixRule(FlagId, Strip, Add, Condition, CrossProduct);
               Inc(i);
@@ -1122,6 +1209,9 @@ begin
               Add := Parts[3];
               Condition := Parts[4];
               if Strip = '0' then Strip := '';
+              // Drop the continuation flags that follow a '/' in the add string
+              SlashAdd := Pos('/', Add);
+              if SlashAdd > 0 then Add := Copy(Add, 1, SlashAdd - 1);
               if Add = '0' then Add := '';
               AddPrefixRule(FlagId, Strip, Add, Condition, CrossProduct);
               Inc(i);
@@ -1201,6 +1291,20 @@ begin
       else if Parts[0] = 'FORBIDDENWORD' then
       begin
         if Parts.Count >= 2 then FForbiddenWordFlag := InternFlag(Parts[1]);
+      end
+      else if Parts[0] = 'IGNORE' then
+      begin
+        IgnoreStr := '';
+        for j := 1 to Parts.Count - 1 do
+          IgnoreStr := IgnoreStr + Parts[j];
+        SetLength(FIgnoreChars, 0);
+        while IgnoreStr <> '' do
+        begin
+          IgnoreChar := UTF8Copy(IgnoreStr, 1, 1);
+          SetLength(FIgnoreChars, Length(FIgnoreChars) + 1);
+          FIgnoreChars[High(FIgnoreChars)] := IgnoreChar;
+          UTF8Delete(IgnoreStr, 1, 1);
+        end;
       end
       else if Parts[0] = 'REP' then
       begin
@@ -1285,17 +1389,10 @@ var
   SlashPos: integer = 0;
   FlagsArr: TIntegerArray = nil;
   i: integer = 0;
-  j: integer = 0;
-  s: string = '';
-  startPos: integer = 0;
   ExpectedWords: integer = 0;
-  FlagId: integer = 0;
   AliasNum: integer = 0;
-  AliasFlag: integer = 0;
-  FlagList: TStringList = nil;
 begin
   Lines := TStringList.Create;
-  FlagList := TStringList.Create;
   try
     Lines.LoadFromStream(Stream);
 
@@ -1306,11 +1403,15 @@ begin
 
     // The first line of the DIC contains the number of words.
     // We use it to preallocate FWords in one shot, eliminating the doubling copies.
+    // Some dictionaries store the count followed by additional fields separated by a tab
     if Lines.Count > 0 then
     begin
       Line := Lines[0];
       if (Length(Line) > 0) and (Ord(Line[1]) = $EF) then
         Delete(Line, 1, 3);
+      i := Pos(#9, Line);
+      if i = 0 then i := Pos(' ', Line);
+      if i > 0 then Line := Copy(Line, 1, i - 1);
       ExpectedWords := StrToIntDef(Trim(Line), 0);
       if ExpectedWords > 0 then
         SetLength(FWords, ExpectedWords + 1024);
@@ -1322,6 +1423,8 @@ begin
       Line := Trim(Lines[LineIdx]);
       Inc(LineIdx);
       if Line = '' then Continue;
+      if (Length(Line) > 0) and (Line[1] = '#') then Continue;
+
       SlashPos := Pos('/', Line);
       if SlashPos > 0 then
       begin
@@ -1334,72 +1437,28 @@ begin
         FlagsStr := '';
       end;
       word := ApplyIconv(word);
+      word := RemoveIgnoreChars(word, FIgnoreChars);
 
       SetLength(FlagsArr, 0);
       if FlagsStr <> '' then
       begin
-        // Split flags into tokens and intern each one.
-        // If AF aliases are defined, the token is a number that indexes FAAliases.
-        FlagList.Clear;
-        case FFlagMode of
-          'ASCII':
-          begin
-            for j := 1 to Length(FlagsStr) do
-              FlagList.Add(FlagsStr[j]);
-          end;
-          'UTF-8':
-          begin
-            s := FlagsStr;
-            while s <> '' do
-            begin
-              FlagList.Add(UTF8Copy(s, 1, 1));
-              UTF8Delete(s, 1, 1);
-            end;
-          end;
-          'LONG', 'NUM':
-          begin
-            i := 1;
-            while i <= Length(FlagsStr) do
-            begin
-              while (i <= Length(FlagsStr)) and (FlagsStr[i] in [',', ' ', #9]) do Inc(i);
-              if i > Length(FlagsStr) then Break;
-              startPos := i;
-              while (i <= Length(FlagsStr)) and not (FlagsStr[i] in [',', ' ', #9]) do Inc(i);
-              FlagList.Add(Copy(FlagsStr, startPos, i - startPos));
-            end;
-          end;
-        end;
-
-        for j := 0 to FlagList.Count - 1 do
+        // When AF aliases are defined the flag field is a single number that indexes FAAliases,
+        // otherwise it is a raw flag string whose token size depends on FFlagMode
+        AliasNum := -1;
+        if (FAFCount > 0) and TryStrToInt(FlagsStr, AliasNum) and (AliasNum >= 1) and (AliasNum <= FAFCount) then
         begin
-          AliasNum := -1;
-          if (FAFCount > 0) and TryStrToInt(FlagList[j], AliasNum) and (AliasNum >= 1) and (AliasNum <= FAFCount) then
-          begin
-            // Expand the alias into the actual flags it points to
-            for i := 0 to High(FAAliases[AliasNum - 1]) do
-            begin
-              AliasFlag := FAAliases[AliasNum - 1][i];
-              SetLength(FlagsArr, Length(FlagsArr) + 1);
-              FlagsArr[High(FlagsArr)] := AliasFlag;
-            end;
-          end
-          else
-          begin
-            FlagId := InternFlag(FlagList[j]);
-            if FlagId >= 0 then
-            begin
-              SetLength(FlagsArr, Length(FlagsArr) + 1);
-              FlagsArr[High(FlagsArr)] := FlagId;
-            end;
-          end;
-        end;
+          SetLength(FlagsArr, Length(FAAliases[AliasNum - 1]));
+          for i := 0 to High(FAAliases[AliasNum - 1]) do
+            FlagsArr[i] := FAAliases[AliasNum - 1][i];
+        end
+        else
+          FlagsArr := ParseFlagString(FlagsStr);
       end;
 
       HashAdd(word, FlagsArr);
     end;
   finally
     Lines.Free;
-    FlagList.Free;
   end;
 end;
 
@@ -2284,6 +2343,7 @@ var
 begin
   SetLength(EmptyFlags, 0);
   CleanWord := ApplyIconv(word);
+  CleanWord := RemoveIgnoreChars(CleanWord, FIgnoreChars);
   if HashFind(CleanWord, idx) then
   begin
     Flags := FWords[idx].Flags;
@@ -2896,6 +2956,7 @@ var
 begin
   Result := nil;
   CleanWord := ApplyIconv(word);
+  CleanWord := RemoveIgnoreChars(CleanWord, FIgnoreChars);
   if FSuggestCache.Find(CleanWord, CacheIdx) then
   begin
     CachedValue := FSuggestCache.ValueFromIndex[CacheIdx];
