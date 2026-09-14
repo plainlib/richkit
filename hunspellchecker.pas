@@ -32,17 +32,23 @@ type
     Strip: string;
     Add: string;
     Condition: string;
+    WideCondition: widestring;  // Cached UTF-16 decode of Condition for the slow path
+    Continuation: TIntegerArray;
   end;
 
   TPrefixRule = record
     Strip: string;
     Add: string;
     Condition: string;
+    WideCondition: widestring;  // Cached UTF-16 decode of Condition for the slow path
+    Continuation: TIntegerArray;
   end;
 
   TAffixGroup = record
     Suffixes: array of TSuffixRule;
     Prefixes: array of TPrefixRule;
+    SuffixCount: integer;  // Number of valid entries in Suffixes
+    PrefixCount: integer;  // Number of valid entries in Prefixes
     CrossProduct: boolean;
   end;
 
@@ -53,9 +59,45 @@ type
 
   TAffixList = array of TAffixEntry;
 
+  // Flattened affix rule used for fast lookup by last/first byte of Add
+  TFlatSuffixRule = record
+    Add: string;
+    Strip: string;
+    Condition: string;
+    WideCondition: widestring;
+    Continuation: TIntegerArray;
+    FlagId: integer;
+    IsEmpty: boolean;  // True when Add='' and Strip=''
+  end;
+  TFlatSuffixRuleArray = array of TFlatSuffixRule;
+
+  TZeroAffixEntry = record
+    FlagId: integer;
+    Continuation: TIntegerArray;
+  end;
+  TZeroAffixEntryArray = array of TZeroAffixEntry;
+
+  TFlatPrefixRule = record
+    Add: string;
+    Strip: string;
+    Condition: string;
+    WideCondition: widestring;
+    Continuation: TIntegerArray;
+    FlagId: integer;
+    IsEmpty: boolean;
+  end;
+  TFlatPrefixRuleArray = array of TFlatPrefixRule;
+
   TWordEntry = record
     word: string;
     Flags: TIntegerArray;
+  end;
+
+  TCompoundPattern = record
+    EndChars: string;
+    EndFlags: TIntegerArray;
+    BeginChars: string;
+    BeginFlags: TIntegerArray;
   end;
 
   TWeightedSuggestion = record
@@ -80,19 +122,29 @@ type
     // Affix rule tables indexed by flag ID
     FSuffixRules: TAffixList;
     FPrefixRules: TAffixList;
+    FSuffixRulesUsed: integer;     // Number of valid entries in FSuffixRules
+    FPrefixRulesUsed: integer;     // Number of valid entries in FPrefixRules
     FSuffixFlagToIdx: TIntegerArray;  // Flag ID -> index in FSuffixRules or -1
     FPrefixFlagToIdx: TIntegerArray;  // Flag ID -> index in FPrefixRules or -1
     FActiveFlags: TIntegerArray;      // All flag IDs with at least one rule
-    FCrossSuffixFlags: TIntegerArray; // Flag IDs with cross product suffixes
-    FCrossPrefixFlags: TIntegerArray; // Flag IDs with cross product prefixes
+    // Flattened rule tables with byte-level indexes for fast TryDerive lookups
+    FSuffixFlat: TFlatSuffixRuleArray;
+    FPrefixFlat: TFlatPrefixRuleArray;
+    FSuffixByLastByte: array[0..255] of TIntegerArray;
+    FPrefixByFirstByte: array[0..255] of TIntegerArray;
     // Word data for suggestions
     FAllWords: array of string;
     FAllWordsLower: array of string;
+    FAllWordsLowerWide: array of widestring;  // Pre-decoded UTF-16 lowercase words
     FAllWordsFirstChar: TCardinalArray;  // First UTF-8 codepoint of each word
     FLengthBuckets: array of TIntegerArray;
-    // Iconv substitutions
+    // Iconv and oconv substitutions
     FIconvFrom: array of string;
     FIconvTo: array of string;
+    // First bytes of every ICONV source pattern. Used to skip conversion when no rule can match
+    FIconvFirstBytes: array[0..255] of boolean;
+    FOCONVFrom: array of string;
+    FOCONVTo: array of string;
     FWordCharsCodes: TCardinalArray;
     // Special flags stored as IDs. -1 means the flag is not defined for this dictionary
     FNoSuggestFlag: integer;
@@ -101,14 +153,22 @@ type
     FCircumfixFlag: integer;
     FForbiddenWordFlag: integer;
     FOnlyInCompoundFlag: integer;
+    FKeepCaseFlag: integer;
+    FForceUCaseFlag: integer;
     FCompoundFlag: integer;
     FCompoundBegin: integer;
     FCompoundMiddle: integer;
     FCompoundEnd: integer;
     FCompoundPermitFlag: integer;
     FCompoundForbidFlag: integer;
+    FCompoundRecurse: integer;      // Guard against infinite recursion in nested compound validation
+    FIncludeSuggestions: boolean;   // When False, CheckText skips Suggest for speed
     FCompoundMin: integer;
+    FCompoundWordMax: integer;
     FCompoundRules: array of string;
+    FCheckCompoundDup: boolean;
+    FCheckCompoundCase: boolean;
+    FCheckCompoundPatterns: array of TCompoundPattern;
     FREPFrom: array of string;
     FREPTo: array of string;
     FMAPGroups: array of string;
@@ -121,6 +181,8 @@ type
     FTryChars: string;
     FKeyGroups: TStringList;
     FIgnoreChars: TStringArray;
+    FHasAffixContinuations: boolean;  // True when at least one affix rule carries continuation flags
+    FZeroAffixEntries: TZeroAffixEntryArray;
     procedure LoadAFFFromStream(Stream: TStream);
     procedure LoadDICFromStream(Stream: TStream);
     function LoadAFF(const FileName: string): boolean;
@@ -129,14 +191,15 @@ type
     function ParseFlagString(const FlagStr: string): TIntegerArray;
     procedure RehashFlags;
     procedure AddAffixGroup(var List: TAffixList; const Flag: integer; const Group: TAffixGroup);
-    procedure AddSuffixRule(const Flag: integer; const Strip, Add, Condition: string; CrossProduct: boolean);
-    procedure AddPrefixRule(const Flag: integer; const Strip, Add, Condition: string; CrossProduct: boolean);
+    procedure AddSuffixRule(const Flag: integer; const Strip, Add, Condition: string; const Continuation: TIntegerArray;
+      CrossProduct: boolean);
+    procedure AddPrefixRule(const Flag: integer; const Strip, Add, Condition: string; const Continuation: TIntegerArray;
+      CrossProduct: boolean);
     procedure BuildAffixIndexes;
-    function MatchesCondition(const Condition, word: string; IsPrefix: boolean): boolean;
-    function TryApplySuffixes(const word: string; const Flags: TIntegerArray): boolean;
-    function TryApplyPrefixes(const word: string; const Flags: TIntegerArray): boolean;
-    function TryApplyCrossProduct(const word: string; const Flags: TIntegerArray): boolean;
-    function TryApplyAffixes(const word: string; const Flags: TIntegerArray): boolean;
+    procedure ShrinkAffixGroups;
+    function MatchesCondition(const Condition: string; const WideCond: widestring; const word: string; IsPrefix: boolean): boolean;
+    function TryDerive(const W: string; Depth: integer; AllowOnlyInCompound: boolean; RequiredFlag: integer;
+      out OutFlags: TIntegerArray): boolean;
     function GetWordFlags(const word: string): TIntegerArray;
     procedure HashAdd(const word: string; const Flags: TIntegerArray);
     function HashFind(const word: string; out Index: integer): boolean;
@@ -145,11 +208,18 @@ type
     function IsWordChar(Ch: pchar; CharLen: integer): boolean;
     procedure BuildAllWordsArray;
     function ApplyIconv(const S: string): string;
+    function ApplyOconv(const S: string): string;
     function MatchesCompoundRule(const word, Rule: string): boolean;
     function IsCompoundNumber(const word: string): boolean;
     function IsNumericWord(const S: string): boolean;
     function IsNoSuggestWord(const Flags: TIntegerArray): boolean;
     function IsForbiddenWord(const Flags: TIntegerArray): boolean;
+    function MatchesCompoundPattern(const LeftPart, RightPart: string; const LeftFlags, RightFlags: TIntegerArray): boolean;
+    function TryGetPartFlags(const Part: string; out OutFlags: TIntegerArray): boolean;
+    function PartCanCompoundLeft(const Flags: TIntegerArray): boolean;
+    function PartCanCompoundMiddle(const Flags: TIntegerArray): boolean;
+    function PartCanCompoundRight(const Flags: TIntegerArray): boolean;
+    function TryCompoundWordRec(const word: string; depth: integer): boolean;
     function HasFlag(const Flags: TIntegerArray; const FlagId: integer): boolean;
     procedure AddWeightedSuggestion(var Suggestions: TWeightedSuggestionArray; const Candidate: string; Dist: integer);
     procedure GenerateAndAddAffixForms(var Suggestions: TWeightedSuggestionArray; const BaseWord: string;
@@ -157,12 +227,14 @@ type
     function StripComment(const S: string): string;
     function CharInClass(const Ch: widechar; const ClassStr: widestring): boolean;
     function ApplyREP(const word, From, Replacement: string): TStringArray;
+    function CheckWordCore(const word: string; AllowBreak: boolean): boolean;
     function CheckWordInternal(const word: string; AllowBreak: boolean): boolean;
     function TryBreakWord(const word: string): boolean;
     function TryCompoundWord(const word: string): boolean;
     procedure GenerateTryKeyCandidates(const CleanWord: string; var Weighted: TWeightedSuggestionArray);
     procedure ProcessREPandMAP(const CleanWord: string; var Weighted: TWeightedSuggestionArray);
     function LevenshteinDistanceLimited(const S1, S2: string; MaxDist: integer): integer;
+    function LevenshteinWideLimited(const W1, W2: widestring; MaxDist: integer): integer;
     procedure ProcessDictionaryScan(const CleanWord: string; var Weighted: TWeightedSuggestionArray);
     function CompareWeighted(const A, B: TWeightedSuggestion): integer;
     procedure SortWeightedSuggestions(var Arr: TWeightedSuggestionArray);
@@ -175,6 +247,7 @@ type
     function CheckWord(const word: string): boolean;
     function CheckText(const Text: string): TSpellErrorArray;
     function Suggest(const word: string): TStringArray;
+    property IncludeSuggestions: boolean read FIncludeSuggestions write FIncludeSuggestions;
   end;
 
 function HunspellDictionaryCandidates(const Lang: string): TStringArray;
@@ -294,7 +367,6 @@ begin
       if preferred <> norm then
         list.Insert(0, preferred);
 
-      if preferred = 'pt_PT' then list.Add('pt_BR');
       if preferred = 'fa_IR' then list.Add('fa-IR');
       if preferred = 'be_BY' then list.Add('be-official');
       if preferred = 'ca' then list.Add('ca-valencia');
@@ -359,6 +431,30 @@ begin
   LenS := UTF8Length(S);
   LenSub := UTF8Length(SubStr);
   Result := (LenS >= LenSub) and (UTF8Copy(S, LenS - LenSub + 1, LenSub) = SubStr);
+end;
+
+// Byte-level suffix and prefix checks. Both operands must be valid UTF-8 strings,
+// so a byte-level match at the end or beginning corresponds to a codepoint boundary
+function ByteEndsWith(const Suffix, S: string): boolean; inline;
+var
+  SLen, SuLen: integer;
+begin
+  SuLen := Length(Suffix);
+  if SuLen = 0 then Exit(True);
+  SLen := Length(S);
+  if SuLen > SLen then Exit(False);
+  Result := CompareMem(@S[SLen - SuLen + 1], @Suffix[1], SuLen);
+end;
+
+function ByteStartsWith(const Prefix, S: string): boolean; inline;
+var
+  SLen, PrLen: integer;
+begin
+  PrLen := Length(Prefix);
+  if PrLen = 0 then Exit(True);
+  SLen := Length(S);
+  if PrLen > SLen then Exit(False);
+  Result := CompareMem(@S[1], @Prefix[1], PrLen);
 end;
 
 function FirstCodepoint(const S: string): cardinal;
@@ -485,7 +581,7 @@ begin
   if From = '' then Exit;
   if From[1] = '^' then
   begin
-    if UTF8StartsStr(Copy(From, 2, MaxInt), word) then
+    if ByteStartsWith(Copy(From, 2, MaxInt), word) then
     begin
       candidate := Replacement + UTF8Copy(word, UTF8Length(Copy(From, 2, MaxInt)) + 1, MaxInt);
       candidate := StringReplace(candidate, '_', ' ', [rfReplaceAll]);
@@ -495,7 +591,7 @@ begin
   end
   else if From[Length(From)] = '$' then
   begin
-    if UTF8EndsStr(Copy(From, 1, Length(From) - 1), word) then
+    if ByteEndsWith(Copy(From, 1, Length(From) - 1), word) then
     begin
       candidate := UTF8Copy(word, 1, UTF8Length(word) - UTF8Length(Copy(From, 1, Length(From) - 1))) + Replacement;
       candidate := StringReplace(candidate, '_', ' ', [rfReplaceAll]);
@@ -768,6 +864,8 @@ end;
 // ---------------------------------------------------------------------------------
 
 constructor THunSpellChecker.Create;
+var
+  b: integer;
 begin
   inherited;
   FWordCount := 0;
@@ -786,21 +884,32 @@ begin
 
   SetLength(FSuffixRules, 0);
   SetLength(FPrefixRules, 0);
+  FSuffixRulesUsed := 0;
+  FPrefixRulesUsed := 0;
   SetLength(FSuffixFlagToIdx, 0);
   SetLength(FPrefixFlagToIdx, 0);
   SetLength(FActiveFlags, 0);
-  SetLength(FCrossSuffixFlags, 0);
-  SetLength(FCrossPrefixFlags, 0);
+  SetLength(FSuffixFlat, 0);
+  SetLength(FPrefixFlat, 0);
+  for b := 0 to 255 do
+  begin
+    SetLength(FSuffixByLastByte[b], 0);
+    SetLength(FPrefixByFirstByte[b], 0);
+  end;
   FFlagMode := 'ASCII';
   FEncoding := 'UTF-8';
 
   SetLength(FAllWords, 0);
   SetLength(FAllWordsLower, 0);
+  SetLength(FAllWordsLowerWide, 0);
   SetLength(FAllWordsFirstChar, 0);
   SetLength(FLengthBuckets, 0);
 
   SetLength(FIconvFrom, 0);
   SetLength(FIconvTo, 0);
+  FillChar(FIconvFirstBytes, SizeOf(FIconvFirstBytes), 0);
+  SetLength(FOCONVFrom, 0);
+  SetLength(FOCONVTo, 0);
   SetLength(FWordCharsCodes, 0);
   SetLength(FREPFrom, 0);
   SetLength(FREPTo, 0);
@@ -814,6 +923,8 @@ begin
   FCircumfixFlag := -1;
   FForbiddenWordFlag := -1;
   FOnlyInCompoundFlag := -1;
+  FKeepCaseFlag := -1;
+  FForceUCaseFlag := -1;
   FCompoundFlag := -1;
   FCompoundBegin := -1;
   FCompoundMiddle := -1;
@@ -821,8 +932,15 @@ begin
   FCompoundPermitFlag := -1;
   FCompoundForbidFlag := -1;
   FCompoundMin := 0;
+  FCompoundRecurse := 0;
+  FIncludeSuggestions := True;
+  FCompoundWordMax := 0;
   FAFCount := 0;
   SetLength(FAAliases, 0);
+
+  FCheckCompoundDup := False;
+  FCheckCompoundCase := False;
+  SetLength(FCheckCompoundPatterns, 0);
 
   FBreakPatterns := TStringList.Create;
   FSuggestCache := TStringList.Create;
@@ -830,9 +948,13 @@ begin
   FSuggestCache.Duplicates := dupIgnore;
   FTryChars := '';
   FKeyGroups := TStringList.Create;
+  FHasAffixContinuations := False;
+  SetLength(FZeroAffixEntries, 0);
 end;
 
 destructor THunSpellChecker.Destroy;
+var
+  b: integer;
 begin
   SetLength(FWords, 0);
   SetLength(FHashTable, 0);
@@ -843,21 +965,31 @@ begin
   SetLength(FSuffixFlagToIdx, 0);
   SetLength(FPrefixFlagToIdx, 0);
   SetLength(FActiveFlags, 0);
-  SetLength(FCrossSuffixFlags, 0);
-  SetLength(FCrossPrefixFlags, 0);
+  SetLength(FSuffixFlat, 0);
+  SetLength(FPrefixFlat, 0);
+  for b := 0 to 255 do
+  begin
+    SetLength(FSuffixByLastByte[b], 0);
+    SetLength(FPrefixByFirstByte[b], 0);
+  end;
   SetLength(FAllWords, 0);
   SetLength(FAllWordsLower, 0);
+  SetLength(FAllWordsLowerWide, 0);
   SetLength(FAllWordsFirstChar, 0);
   SetLength(FLengthBuckets, 0);
   SetLength(FIconvFrom, 0);
   SetLength(FIconvTo, 0);
+  SetLength(FOCONVFrom, 0);
+  SetLength(FOCONVTo, 0);
   SetLength(FWordCharsCodes, 0);
   SetLength(FREPFrom, 0);
   SetLength(FREPTo, 0);
   SetLength(FMAPGroups, 0);
   SetLength(FIgnoreChars, 0);
   SetLength(FCompoundRules, 0);
+  SetLength(FCheckCompoundPatterns, 0);
   SetLength(FAAliases, 0);
+  SetLength(FZeroAffixEntries, 0);
   FBreakPatterns.Free;
   FSuggestCache.Free;
   FKeyGroups.Free;
@@ -879,23 +1011,30 @@ begin
     FillDWord(FFlagHash[0], FFlagHashSize, $FFFFFFFF);
     SetLength(FSuffixRules, 0);
     SetLength(FPrefixRules, 0);
+    FSuffixRulesUsed := 0;
+    FPrefixRulesUsed := 0;
     SetLength(FSuffixFlagToIdx, 0);
     SetLength(FPrefixFlagToIdx, 0);
     SetLength(FActiveFlags, 0);
-    SetLength(FCrossSuffixFlags, 0);
-    SetLength(FCrossPrefixFlags, 0);
+    SetLength(FSuffixFlat, 0);
+    SetLength(FPrefixFlat, 0);
     SetLength(FAllWords, 0);
     SetLength(FAllWordsLower, 0);
+    SetLength(FAllWordsLowerWide, 0);
     SetLength(FAllWordsFirstChar, 0);
     SetLength(FLengthBuckets, 0);
     SetLength(FIconvFrom, 0);
     SetLength(FIconvTo, 0);
+    FillChar(FIconvFirstBytes, SizeOf(FIconvFirstBytes), 0);
+    SetLength(FOCONVFrom, 0);
+    SetLength(FOCONVTo, 0);
     SetLength(FWordCharsCodes, 0);
     SetLength(FIgnoreChars, 0);
     SetLength(FCompoundRules, 0);
     SetLength(FREPFrom, 0);
     SetLength(FREPTo, 0);
     SetLength(FAAliases, 0);
+    SetLength(FZeroAffixEntries, 0);
     FBreakPatterns.Clear;
     FKeyGroups.Clear;
     FSuggestCache.Clear;
@@ -907,6 +1046,8 @@ begin
     FCircumfixFlag := -1;
     FForbiddenWordFlag := -1;
     FOnlyInCompoundFlag := -1;
+    FKeepCaseFlag := -1;
+    FForceUCaseFlag := -1;
     FCompoundFlag := -1;
     FCompoundBegin := -1;
     FCompoundMiddle := -1;
@@ -914,6 +1055,11 @@ begin
     FCompoundPermitFlag := -1;
     FCompoundForbidFlag := -1;
     FCompoundMin := 0;
+    FCompoundWordMax := 0;
+    FCheckCompoundDup := False;
+    FCheckCompoundCase := False;
+    SetLength(FCheckCompoundPatterns, 0);
+    FHasAffixContinuations := False;
     FAFCount := 0;
     FTryChars := '';
 
@@ -932,23 +1078,30 @@ begin
     FillDWord(FFlagHash[0], FFlagHashSize, $FFFFFFFF);
     SetLength(FSuffixRules, 0);
     SetLength(FPrefixRules, 0);
+    FSuffixRulesUsed := 0;
+    FPrefixRulesUsed := 0;
     SetLength(FSuffixFlagToIdx, 0);
     SetLength(FPrefixFlagToIdx, 0);
     SetLength(FActiveFlags, 0);
-    SetLength(FCrossSuffixFlags, 0);
-    SetLength(FCrossPrefixFlags, 0);
+    SetLength(FSuffixFlat, 0);
+    SetLength(FPrefixFlat, 0);
     SetLength(FAllWords, 0);
     SetLength(FAllWordsLower, 0);
+    SetLength(FAllWordsLowerWide, 0);
     SetLength(FAllWordsFirstChar, 0);
     SetLength(FLengthBuckets, 0);
     SetLength(FIconvFrom, 0);
     SetLength(FIconvTo, 0);
+    FillChar(FIconvFirstBytes, SizeOf(FIconvFirstBytes), 0);
+    SetLength(FOCONVFrom, 0);
+    SetLength(FOCONVTo, 0);
     SetLength(FWordCharsCodes, 0);
     SetLength(FIgnoreChars, 0);
     SetLength(FCompoundRules, 0);
     SetLength(FREPFrom, 0);
     SetLength(FREPTo, 0);
     SetLength(FAAliases, 0);
+    SetLength(FZeroAffixEntries, 0);
     FBreakPatterns.Clear;
     FKeyGroups.Clear;
     FSuggestCache.Clear;
@@ -959,6 +1112,8 @@ begin
     FCircumfixFlag := -1;
     FForbiddenWordFlag := -1;
     FOnlyInCompoundFlag := -1;
+    FKeepCaseFlag := -1;
+    FForceUCaseFlag := -1;
     FCompoundFlag := -1;
     FCompoundBegin := -1;
     FCompoundMiddle := -1;
@@ -966,6 +1121,11 @@ begin
     FCompoundPermitFlag := -1;
     FCompoundForbidFlag := -1;
     FCompoundMin := 0;
+    FCompoundWordMax := 0;
+    FCheckCompoundDup := False;
+    FCheckCompoundCase := False;
+    SetLength(FCheckCompoundPatterns, 0);
+    FHasAffixContinuations := False;
     FAFCount := 0;
     FTryChars := '';
     FillDWord(FHashTable[0], FHashSize, $FFFFFFFF);
@@ -1022,6 +1182,7 @@ var
   SlashAdd: integer = 0;
   IgnoreStr: string = '';
   IgnoreChar: string = '';
+  Continuation: TIntegerArray = nil;
 begin
   Lines := TStringList.Create;
   Parts := TStringList.Create;
@@ -1132,6 +1293,10 @@ begin
       begin
         if Parts.Count >= 2 then FCompoundMin := StrToIntDef(Parts[1], 0);
       end
+      else if Parts[0] = 'COMPOUNDWORDMAX' then
+      begin
+        if Parts.Count >= 2 then FCompoundWordMax := StrToIntDef(Parts[1], 0);
+      end
       else if Parts[0] = 'COMPOUNDRULE' then
       begin
         if Parts.Count >= 2 then
@@ -1155,11 +1320,67 @@ begin
           end;
         end;
       end
+      else if Parts[0] = 'CHECKCOMPOUNDDUP' then
+      begin
+        FCheckCompoundDup := True;
+      end
+      else if Parts[0] = 'CHECKCOMPOUNDCASE' then
+      begin
+        FCheckCompoundCase := True;
+      end
+      else if Parts[0] = 'CHECKCOMPOUNDPATTERN' then
+      begin
+        if Parts.Count >= 2 then
+        begin
+          Count := StrToIntDef(Parts[1], 0);
+          i := 0;
+          while i < Count do
+          begin
+            if LineIdx >= Lines.Count then Break;
+            Line := StripComment(Lines[LineIdx]);
+            Line := Trim(Line);
+            Inc(LineIdx);
+            if Line = '' then Continue;
+            SplitBySpaces(Line, Parts);
+            if (Parts.Count >= 3) and (Parts[0] = 'CHECKCOMPOUNDPATTERN') then
+            begin
+              SetLength(FCheckCompoundPatterns, Length(FCheckCompoundPatterns) + 1);
+              with FCheckCompoundPatterns[High(FCheckCompoundPatterns)] do
+              begin
+                if (Length(Parts[1]) > 0) and (Parts[1][1] = '/') then
+                begin
+                  EndChars := '';
+                  EndFlags := ParseFlagString(Copy(Parts[1], 2, MaxInt));
+                end
+                else
+                begin
+                  EndChars := Parts[1];
+                  SetLength(EndFlags, 0);
+                end;
+                if (Length(Parts[2]) > 0) and (Parts[2][1] = '/') then
+                begin
+                  BeginChars := '';
+                  BeginFlags := ParseFlagString(Copy(Parts[2], 2, MaxInt));
+                end
+                else
+                begin
+                  BeginChars := Parts[2];
+                  SetLength(BeginFlags, 0);
+                end;
+              end;
+              Inc(i);
+            end;
+          end;
+        end;
+      end
       else if Parts[0] = 'SFX' then
       begin
         if Parts.Count >= 4 then
         begin
           FlagStr := Parts[1];
+          // In long mode a single flag is 2 bytes. Truncate longer strings accordingly
+          if (FFlagMode = 'LONG') and (Length(FlagStr) > 2) then
+            FlagStr := Copy(FlagStr, 1, 2);
           FlagId := InternFlag(FlagStr);
           CrossProduct := (Parts[2] = 'Y');
           Count := StrToIntDef(Parts[3], 0);
@@ -1178,11 +1399,16 @@ begin
               Add := Parts[3];
               Condition := Parts[4];
               if Strip = '0' then Strip := '';
-              // Drop the continuation flags that follow a '/' in the add string
+              // Split the add string from its continuation flags after the slash
+              SetLength(Continuation, 0);
               SlashAdd := Pos('/', Add);
-              if SlashAdd > 0 then Add := Copy(Add, 1, SlashAdd - 1);
+              if SlashAdd > 0 then
+              begin
+                Continuation := ParseFlagString(Copy(Add, SlashAdd + 1, MaxInt));
+                Add := Copy(Add, 1, SlashAdd - 1);
+              end;
               if Add = '0' then Add := '';
-              AddSuffixRule(FlagId, Strip, Add, Condition, CrossProduct);
+              AddSuffixRule(FlagId, Strip, Add, Condition, Continuation, CrossProduct);
               Inc(i);
             end;
           end;
@@ -1193,6 +1419,9 @@ begin
         if Parts.Count >= 4 then
         begin
           FlagStr := Parts[1];
+          // In long mode a single flag is 2 bytes. Truncate longer strings accordingly
+          if (FFlagMode = 'LONG') and (Length(FlagStr) > 2) then
+            FlagStr := Copy(FlagStr, 1, 2);
           FlagId := InternFlag(FlagStr);
           CrossProduct := (Parts[2] = 'Y');
           Count := StrToIntDef(Parts[3], 0);
@@ -1211,11 +1440,16 @@ begin
               Add := Parts[3];
               Condition := Parts[4];
               if Strip = '0' then Strip := '';
-              // Drop the continuation flags that follow a '/' in the add string
+              // Split the add string from its continuation flags after the slash
+              SetLength(Continuation, 0);
               SlashAdd := Pos('/', Add);
-              if SlashAdd > 0 then Add := Copy(Add, 1, SlashAdd - 1);
+              if SlashAdd > 0 then
+              begin
+                Continuation := ParseFlagString(Copy(Add, SlashAdd + 1, MaxInt));
+                Add := Copy(Add, 1, SlashAdd - 1);
+              end;
               if Add = '0' then Add := '';
-              AddPrefixRule(FlagId, Strip, Add, Condition, CrossProduct);
+              AddPrefixRule(FlagId, Strip, Add, Condition, Continuation, CrossProduct);
               Inc(i);
             end;
           end;
@@ -1242,6 +1476,32 @@ begin
               SetLength(FIconvTo, Length(FIconvTo) + 1);
               FIconvFrom[High(FIconvFrom)] := Parts[0];
               FIconvTo[High(FIconvTo)] := Parts[1];
+              Inc(i);
+            end;
+          end;
+        end;
+      end
+      else if Parts[0] = 'OCONV' then
+      begin
+        if Parts.Count >= 2 then
+        begin
+          Count := StrToIntDef(Parts[1], 0);
+          i := 0;
+          while i < Count do
+          begin
+            if LineIdx >= Lines.Count then Break;
+            Line := StripComment(Lines[LineIdx]);
+            Line := Trim(Line);
+            Inc(LineIdx);
+            if Line = '' then Continue;
+            SplitBySpaces(Line, Parts);
+            if (Parts.Count > 0) and (Parts[0] = 'OCONV') then Parts.Delete(0);
+            if Parts.Count >= 2 then
+            begin
+              SetLength(FOCONVFrom, Length(FOCONVFrom) + 1);
+              SetLength(FOCONVTo, Length(FOCONVTo) + 1);
+              FOCONVFrom[High(FOCONVFrom)] := Parts[0];
+              FOCONVTo[High(FOCONVTo)] := Parts[1];
               Inc(i);
             end;
           end;
@@ -1293,6 +1553,14 @@ begin
       else if Parts[0] = 'FORBIDDENWORD' then
       begin
         if Parts.Count >= 2 then FForbiddenWordFlag := InternFlag(Parts[1]);
+      end
+      else if Parts[0] = 'KEEPCASE' then
+      begin
+        if Parts.Count >= 2 then FKeepCaseFlag := InternFlag(Parts[1]);
+      end
+      else if Parts[0] = 'FORCEUCASE' then
+      begin
+        if Parts.Count >= 2 then FForceUCaseFlag := InternFlag(Parts[1]);
       end
       else if Parts[0] = 'IGNORE' then
       begin
@@ -1375,6 +1643,15 @@ begin
         FKeyGroups.DelimitedText := KeyStr;
       end;
     end;
+
+    // Precompute the set of first bytes of all ICONV source patterns
+    FillChar(FIconvFirstBytes, SizeOf(FIconvFirstBytes), 0);
+    for i := 0 to High(FIconvFrom) do
+      if FIconvFrom[i] <> '' then
+        FIconvFirstBytes[Ord(FIconvFrom[i][1])] := True;
+
+    // Trim reserved capacity before the tables are used for lookups
+    ShrinkAffixGroups;
   finally
     Lines.Free;
     Parts.Free;
@@ -1515,21 +1792,17 @@ begin
   List[High(List)].Group := Group;
 end;
 
-procedure THunSpellChecker.AddSuffixRule(const Flag: integer; const Strip, Add, Condition: string; CrossProduct: boolean);
+// Appends a suffix rule to the group with the given flag.
+// The array of groups and the array of rules inside a group grow geometrically
+// so that adding thousands of rules stays linear in time.
+procedure THunSpellChecker.AddSuffixRule(const Flag: integer; const Strip, Add, Condition: string;
+  const Continuation: TIntegerArray; CrossProduct: boolean);
 var
-  Group: TAffixGroup;
   Rule: TSuffixRule;
-  idx: integer;
-  i: integer;
-  CrossProd: boolean;
+  idx: integer = -1;
+  i: integer = 0;
+  Cap: integer = 0;
 begin
-  Group := Default(TAffixGroup);
-  CrossProd := CrossProduct;
-  SetLength(Group.Suffixes, 0);
-  SetLength(Group.Prefixes, 0);
-  Group.CrossProduct := CrossProd;
-
-  idx := -1;
   if (Flag >= 0) and (Flag < Length(FSuffixFlagToIdx)) then
     idx := FSuffixFlagToIdx[Flag];
 
@@ -1545,38 +1818,55 @@ begin
         Inc(i);
       end;
     end;
-    SetLength(FSuffixRules, Length(FSuffixRules) + 1);
-    idx := High(FSuffixRules);
+    // Grow the group table geometrically to keep appends fast
+    if FSuffixRulesUsed = Length(FSuffixRules) then
+    begin
+      if Length(FSuffixRules) = 0 then Cap := 16
+      else
+        Cap := Length(FSuffixRules) * 2;
+      SetLength(FSuffixRules, Cap);
+    end;
+    idx := FSuffixRulesUsed;
     FSuffixRules[idx].Flag := Flag;
-    FSuffixRules[idx].Group := Group;
+    FSuffixRules[idx].Group := Default(TAffixGroup);
+    FSuffixRules[idx].Group.CrossProduct := CrossProduct;
     FSuffixFlagToIdx[Flag] := idx;
-  end
-  else
-    Group := FSuffixRules[idx].Group;
+    Inc(FSuffixRulesUsed);
+  end;
 
   Rule.Strip := Strip;
   Rule.Add := Add;
   Rule.Condition := Condition;
-  SetLength(Group.Suffixes, Length(Group.Suffixes) + 1);
-  Group.Suffixes[High(Group.Suffixes)] := Rule;
-  FSuffixRules[idx].Group := Group;
+  // Decode the condition once if the slow path is likely needed
+  if (Pos('[', Condition) > 0) or (Pos('.', Condition) > 0) then
+    Rule.WideCondition := UTF8Decode(Condition)
+  else
+    Rule.WideCondition := '';
+  if Length(Continuation) > 0 then FHasAffixContinuations := True;
+  Rule.Continuation := Continuation;
+
+  // Grow the suffix array geometrically to avoid quadratic reallocation
+  if FSuffixRules[idx].Group.SuffixCount = Length(FSuffixRules[idx].Group.Suffixes) then
+  begin
+    if FSuffixRules[idx].Group.SuffixCount = 0 then Cap := 8
+    else
+      Cap := FSuffixRules[idx].Group.SuffixCount * 2;
+    SetLength(FSuffixRules[idx].Group.Suffixes, Cap);
+  end;
+  FSuffixRules[idx].Group.Suffixes[FSuffixRules[idx].Group.SuffixCount] := Rule;
+  Inc(FSuffixRules[idx].Group.SuffixCount);
 end;
 
-procedure THunSpellChecker.AddPrefixRule(const Flag: integer; const Strip, Add, Condition: string; CrossProduct: boolean);
+// Appends a prefix rule to the group with the given flag, with the same
+// geometric growth strategy as suffixes.
+procedure THunSpellChecker.AddPrefixRule(const Flag: integer; const Strip, Add, Condition: string;
+  const Continuation: TIntegerArray; CrossProduct: boolean);
 var
-  Group: TAffixGroup;
   Rule: TPrefixRule;
-  idx: integer;
-  i: integer;
-  CrossProd: boolean;
+  idx: integer = -1;
+  i: integer = 0;
+  Cap: integer = 0;
 begin
-  Group := Default(TAffixGroup);
-  CrossProd := CrossProduct;
-  SetLength(Group.Suffixes, 0);
-  SetLength(Group.Prefixes, 0);
-  Group.CrossProduct := CrossProd;
-
-  idx := -1;
   if (Flag >= 0) and (Flag < Length(FPrefixFlagToIdx)) then
     idx := FPrefixFlagToIdx[Flag];
 
@@ -1592,28 +1882,78 @@ begin
         Inc(i);
       end;
     end;
-    SetLength(FPrefixRules, Length(FPrefixRules) + 1);
-    idx := High(FPrefixRules);
+    // Grow the group table geometrically to keep appends fast
+    if FPrefixRulesUsed = Length(FPrefixRules) then
+    begin
+      if Length(FPrefixRules) = 0 then Cap := 16
+      else
+        Cap := Length(FPrefixRules) * 2;
+      SetLength(FPrefixRules, Cap);
+    end;
+    idx := FPrefixRulesUsed;
     FPrefixRules[idx].Flag := Flag;
-    FPrefixRules[idx].Group := Group;
+    FPrefixRules[idx].Group := Default(TAffixGroup);
+    FPrefixRules[idx].Group.CrossProduct := CrossProduct;
     FPrefixFlagToIdx[Flag] := idx;
-  end
-  else
-    Group := FPrefixRules[idx].Group;
+    Inc(FPrefixRulesUsed);
+  end;
 
   Rule.Strip := Strip;
   Rule.Add := Add;
   Rule.Condition := Condition;
-  SetLength(Group.Prefixes, Length(Group.Prefixes) + 1);
-  Group.Prefixes[High(Group.Prefixes)] := Rule;
-  FPrefixRules[idx].Group := Group;
+  if (Pos('[', Condition) > 0) or (Pos('.', Condition) > 0) then
+    Rule.WideCondition := UTF8Decode(Condition)
+  else
+    Rule.WideCondition := '';
+  if Length(Continuation) > 0 then FHasAffixContinuations := True;
+  Rule.Continuation := Continuation;
+
+  // Grow the prefix array geometrically to avoid quadratic reallocation
+  if FPrefixRules[idx].Group.PrefixCount = Length(FPrefixRules[idx].Group.Prefixes) then
+  begin
+    if FPrefixRules[idx].Group.PrefixCount = 0 then Cap := 8
+    else
+      Cap := FPrefixRules[idx].Group.PrefixCount * 2;
+    SetLength(FPrefixRules[idx].Group.Prefixes, Cap);
+  end;
+  FPrefixRules[idx].Group.Prefixes[FPrefixRules[idx].Group.PrefixCount] := Rule;
+  Inc(FPrefixRules[idx].Group.PrefixCount);
+end;
+
+// Trims affix arrays to their exact used sizes and drops reserved capacity.
+// Must be called before BuildAffixIndexes so the flat tables are compact.
+procedure THunSpellChecker.ShrinkAffixGroups;
+var
+  i: integer = 0;
+begin
+  for i := 0 to FSuffixRulesUsed - 1 do
+    if Length(FSuffixRules[i].Group.Suffixes) > FSuffixRules[i].Group.SuffixCount then
+      SetLength(FSuffixRules[i].Group.Suffixes, FSuffixRules[i].Group.SuffixCount);
+  for i := 0 to FPrefixRulesUsed - 1 do
+    if Length(FPrefixRules[i].Group.Prefixes) > FPrefixRules[i].Group.PrefixCount then
+      SetLength(FPrefixRules[i].Group.Prefixes, FPrefixRules[i].Group.PrefixCount);
+  SetLength(FSuffixRules, FSuffixRulesUsed);
+  SetLength(FPrefixRules, FPrefixRulesUsed);
 end;
 
 procedure THunSpellChecker.BuildAffixIndexes;
 var
-  i, Cnt: integer;
-  id: integer;
+  i: integer = 0;
+  Cnt: integer = 0;
+  b: integer = 0;
+  r: integer = 0;
+  Counts: array[0..255] of integer;
+  Positions: array[0..255] of integer;
+  LastByte: byte = 0;
+  FirstByte: byte = 0;
+  SrcSuffix: TSuffixRule;
+  SrcPrefix: TPrefixRule;
+  FlatS: TFlatSuffixRule;
+  FlatP: TFlatPrefixRule;
 begin
+  // Shrink first so the flat tables are built on exact sizes
+  ShrinkAffixGroups;
+
   if Length(FSuffixFlagToIdx) < FFlagCount then
   begin
     Cnt := Length(FSuffixFlagToIdx);
@@ -1636,29 +1976,144 @@ begin
   end;
 
   SetLength(FActiveFlags, 0);
-  SetLength(FCrossSuffixFlags, 0);
-  SetLength(FCrossPrefixFlags, 0);
-
-  for i := 0 to High(FSuffixRules) do
+  for i := 0 to FSuffixRulesUsed - 1 do
   begin
-    id := FSuffixRules[i].Flag;
     SetLength(FActiveFlags, Length(FActiveFlags) + 1);
-    FActiveFlags[High(FActiveFlags)] := id;
-    if FSuffixRules[i].Group.CrossProduct then
+    FActiveFlags[High(FActiveFlags)] := FSuffixRules[i].Flag;
+  end;
+  for i := 0 to FPrefixRulesUsed - 1 do
+  begin
+    SetLength(FActiveFlags, Length(FActiveFlags) + 1);
+    FActiveFlags[High(FActiveFlags)] := FPrefixRules[i].Flag;
+  end;
+
+  // Build the flat suffix rules in creation order so that iteration order is preserved
+  SetLength(FSuffixFlat, 0);
+  for i := 0 to FSuffixRulesUsed - 1 do
+    for r := 0 to FSuffixRules[i].Group.SuffixCount - 1 do
     begin
-      SetLength(FCrossSuffixFlags, Length(FCrossSuffixFlags) + 1);
-      FCrossSuffixFlags[High(FCrossSuffixFlags)] := id;
+      SrcSuffix := FSuffixRules[i].Group.Suffixes[r];
+      SetLength(FSuffixFlat, Length(FSuffixFlat) + 1);
+      FlatS.Add := SrcSuffix.Add;
+      FlatS.Strip := SrcSuffix.Strip;
+      FlatS.Condition := SrcSuffix.Condition;
+      FlatS.WideCondition := SrcSuffix.WideCondition;
+      FlatS.Continuation := SrcSuffix.Continuation;
+      FlatS.FlagId := FSuffixRules[i].Flag;
+      FlatS.IsEmpty := (SrcSuffix.Add = '') and (SrcSuffix.Strip = '');
+      FSuffixFlat[High(FSuffixFlat)] := FlatS;
+    end;
+
+  // Build the flat prefix rules in creation order
+  SetLength(FPrefixFlat, 0);
+  for i := 0 to FPrefixRulesUsed - 1 do
+    for r := 0 to FPrefixRules[i].Group.PrefixCount - 1 do
+    begin
+      SrcPrefix := FPrefixRules[i].Group.Prefixes[r];
+      SetLength(FPrefixFlat, Length(FPrefixFlat) + 1);
+      FlatP.Add := SrcPrefix.Add;
+      FlatP.Strip := SrcPrefix.Strip;
+      FlatP.Condition := SrcPrefix.Condition;
+      FlatP.WideCondition := SrcPrefix.WideCondition;
+      FlatP.Continuation := SrcPrefix.Continuation;
+      FlatP.FlagId := FPrefixRules[i].Flag;
+      FlatP.IsEmpty := (SrcPrefix.Add = '') and (SrcPrefix.Strip = '');
+      FPrefixFlat[High(FPrefixFlat)] := FlatP;
+    end;
+
+  // Collect zero-affix rules that carry continuation flags. They let a
+  // prefix rule match a stem whose flag only appears through a zero-affix
+  // suffix (e.g. French SFX S. 0 0/L'D'Q' [^sxz]).
+  SetLength(FZeroAffixEntries, 0);
+  for i := 0 to High(FSuffixFlat) do
+    if FSuffixFlat[i].IsEmpty and (Length(FSuffixFlat[i].Continuation) > 0) then
+    begin
+      SetLength(FZeroAffixEntries, Length(FZeroAffixEntries) + 1);
+      with FZeroAffixEntries[High(FZeroAffixEntries)] do
+      begin
+        FlagId := FSuffixFlat[i].FlagId;
+        Continuation := FSuffixFlat[i].Continuation;
+      end;
+    end;
+  for i := 0 to High(FPrefixFlat) do
+    if FPrefixFlat[i].IsEmpty and (Length(FPrefixFlat[i].Continuation) > 0) then
+    begin
+      SetLength(FZeroAffixEntries, Length(FZeroAffixEntries) + 1);
+      with FZeroAffixEntries[High(FZeroAffixEntries)] do
+      begin
+        FlagId := FPrefixFlat[i].FlagId;
+        Continuation := FPrefixFlat[i].Continuation;
+      end;
+    end;
+
+  // Build the suffix byte index: every bucket gets rules whose Add is empty
+  // (they match any word) plus rules whose Add ends with the bucket byte
+  for b := 0 to 255 do
+  begin
+    Counts[b] := 0;
+    Positions[b] := 0;
+    SetLength(FSuffixByLastByte[b], 0);
+    SetLength(FPrefixByFirstByte[b], 0);
+  end;
+  for i := 0 to High(FSuffixFlat) do
+  begin
+    if FSuffixFlat[i].Add = '' then
+      for b := 0 to 255 do
+        Inc(Counts[b])
+    else
+      Inc(Counts[Ord(FSuffixFlat[i].Add[Length(FSuffixFlat[i].Add)])]);
+  end;
+  for b := 0 to 255 do
+    SetLength(FSuffixByLastByte[b], Counts[b]);
+  for i := 0 to High(FSuffixFlat) do
+  begin
+    if FSuffixFlat[i].Add = '' then
+    begin
+      for b := 0 to 255 do
+      begin
+        FSuffixByLastByte[b][Positions[b]] := i;
+        Inc(Positions[b]);
+      end;
+    end
+    else
+    begin
+      LastByte := Ord(FSuffixFlat[i].Add[Length(FSuffixFlat[i].Add)]);
+      FSuffixByLastByte[LastByte][Positions[LastByte]] := i;
+      Inc(Positions[LastByte]);
     end;
   end;
-  for i := 0 to High(FPrefixRules) do
+
+  // Build the prefix byte index: empty Add rules go into every bucket
+  for b := 0 to 255 do
   begin
-    id := FPrefixRules[i].Flag;
-    SetLength(FActiveFlags, Length(FActiveFlags) + 1);
-    FActiveFlags[High(FActiveFlags)] := id;
-    if FPrefixRules[i].Group.CrossProduct then
+    Counts[b] := 0;
+    Positions[b] := 0;
+  end;
+  for i := 0 to High(FPrefixFlat) do
+  begin
+    if FPrefixFlat[i].Add = '' then
+      for b := 0 to 255 do
+        Inc(Counts[b])
+    else
+      Inc(Counts[Ord(FPrefixFlat[i].Add[1])]);
+  end;
+  for b := 0 to 255 do
+    SetLength(FPrefixByFirstByte[b], Counts[b]);
+  for i := 0 to High(FPrefixFlat) do
+  begin
+    if FPrefixFlat[i].Add = '' then
     begin
-      SetLength(FCrossPrefixFlags, Length(FCrossPrefixFlags) + 1);
-      FCrossPrefixFlags[High(FCrossPrefixFlags)] := id;
+      for b := 0 to 255 do
+      begin
+        FPrefixByFirstByte[b][Positions[b]] := i;
+        Inc(Positions[b]);
+      end;
+    end
+    else
+    begin
+      FirstByte := Ord(FPrefixFlat[i].Add[1]);
+      FPrefixByFirstByte[FirstByte][Positions[FirstByte]] := i;
+      Inc(Positions[FirstByte]);
     end;
   end;
 end;
@@ -1667,9 +2122,14 @@ end;
 // Conditions
 // ---------------------------------------------------------------------------------
 
-function THunSpellChecker.MatchesCondition(const Condition, word: string; IsPrefix: boolean): boolean;
+// Uses the pre-decoded WideCond when the slow path is needed.
+// WideCond may be empty when the condition has no bracket or dot, in which case
+// the fast byte-level comparison is used.
+function THunSpellChecker.MatchesCondition(const Condition: string; const WideCond: widestring; const word: string;
+  IsPrefix: boolean): boolean;
 var
-  WideCond, WideWord: widestring;
+  WideWord: widestring;
+  LocalWideCond: widestring;
   wPos, cPos: integer;
   wChar, cChar: widechar;
   openPos, closePos: integer;
@@ -1679,44 +2139,47 @@ var
 begin
   if Condition = '' then Exit(True);
 
-  WideCond := UTF8Decode(Condition);
-  WideWord := UTF8Decode(word);
-
-  if (WideCond = '.') and (Length(WideWord) > 0) then Exit(True);
-
-  if (Pos('[', WideCond) = 0) and (Pos('.', WideCond) = 0) then
+  // Fast path for plain (dot-less, bracket-less) conditions on the byte level
+  if (Pos('[', Condition) = 0) and (Pos('.', Condition) = 0) then
   begin
     if IsPrefix then
-      Result := (Length(WideWord) >= Length(WideCond)) and (Copy(WideWord, 1, Length(WideCond)) = WideCond)
+      Result := ByteStartsWith(Condition, word)
     else
-      Result := (Length(WideWord) >= Length(WideCond)) and (Copy(WideWord, Length(WideWord) - Length(WideCond) +
-        1, Length(WideCond)) = WideCond);
+      Result := ByteEndsWith(Condition, word);
     Exit;
   end;
+
+  LocalWideCond := WideCond;
+  if LocalWideCond = '' then
+    LocalWideCond := UTF8Decode(Condition);
+
+  WideWord := UTF8Decode(word);
+
+  if LocalWideCond = '.' then Exit(Length(WideWord) > 0);
 
   if IsPrefix then
   begin
     wPos := 1;
     cPos := 1;
-    while (wPos <= Length(WideWord)) and (cPos <= Length(WideCond)) do
+    while (wPos <= Length(WideWord)) and (cPos <= Length(LocalWideCond)) do
     begin
-      cChar := WideCond[cPos];
+      cChar := LocalWideCond[cPos];
       wChar := WideWord[wPos];
 
       if cChar = '[' then
       begin
         openPos := cPos;
         closePos := openPos;
-        while (closePos <= Length(WideCond)) and (WideCond[closePos] <> ']') do Inc(closePos);
-        if closePos > Length(WideCond) then Exit(False);
+        while (closePos <= Length(LocalWideCond)) and (LocalWideCond[closePos] <> ']') do Inc(closePos);
+        if closePos > Length(LocalWideCond) then Exit(False);
         isNeg := False;
         startContent := openPos + 1;
-        if (startContent <= closePos) and (WideCond[startContent] = '^') then
+        if (startContent <= closePos) and (LocalWideCond[startContent] = '^') then
         begin
           isNeg := True;
           startContent := openPos + 2;
         end;
-        classStr := Copy(WideCond, startContent, closePos - startContent);
+        classStr := Copy(LocalWideCond, startContent, closePos - startContent);
         if isNeg then
         begin
           if CharInClass(wChar, classStr) then Exit(False);
@@ -1743,31 +2206,31 @@ begin
         Continue;
       end;
     end;
-    Result := (cPos > Length(WideCond));
+    Result := (cPos > Length(LocalWideCond));
   end
   else
   begin
     wPos := Length(WideWord);
-    cPos := Length(WideCond);
+    cPos := Length(LocalWideCond);
     while (wPos >= 1) and (cPos >= 1) do
     begin
-      cChar := WideCond[cPos];
+      cChar := LocalWideCond[cPos];
       wChar := WideWord[wPos];
 
       if cChar = ']' then
       begin
         closePos := cPos;
         openPos := closePos;
-        while (openPos >= 1) and (WideCond[openPos] <> '[') do Dec(openPos);
+        while (openPos >= 1) and (LocalWideCond[openPos] <> '[') do Dec(openPos);
         if openPos < 1 then Exit(False);
         isNeg := False;
         startContent := openPos + 1;
-        if (startContent <= closePos) and (WideCond[startContent] = '^') then
+        if (startContent <= closePos) and (LocalWideCond[startContent] = '^') then
         begin
           isNeg := True;
           startContent := openPos + 2;
         end;
-        classStr := Copy(WideCond, startContent, closePos - startContent);
+        classStr := Copy(LocalWideCond, startContent, closePos - startContent);
         if isNeg then
         begin
           if CharInClass(wChar, classStr) then Exit(False);
@@ -1799,304 +2262,142 @@ begin
 end;
 
 // ---------------------------------------------------------------------------------
-// Affix application
+// Affix derivation via recursion, with continuation flag chaining
 // ---------------------------------------------------------------------------------
 
-function THunSpellChecker.TryApplySuffixes(const word: string; const Flags: TIntegerArray): boolean;
+// Returns True if W is a valid derived form. OutFlags receives the flags of W.
+// Uses the flat rule tables and byte-level indexes for fast lookup.
+function THunSpellChecker.TryDerive(const W: string; Depth: integer; AllowOnlyInCompound: boolean;
+  RequiredFlag: integer; out OutFlags: TIntegerArray): boolean;
 var
-  i, r, idx: integer;
-  FlagId: integer;
-  Group: TAffixGroup;
-  Rule: TSuffixRule;
-  CandidateStem: string;
-  StemIndex: integer;
-  FlagsEmpty: boolean;
-  StemFlags: TIntegerArray;
+  j, r, k, FlatIdx: integer;
+  WIdx: integer = 0;
+  WFound: boolean = False;
+  WFlags: TIntegerArray;
+  ContFlags: TIntegerArray;
+  Prev: string;
+  PrevFlags: TIntegerArray;
+  NeedAffix: boolean;
+  OnlyInCompound: boolean;
+  LastByte: byte = 0;
+  FirstByte: byte = 0;
+  FSR: TFlatSuffixRule;
+  FPR: TFlatPrefixRule;
 begin
   Result := False;
-  FlagsEmpty := Length(Flags) = 0;
-  if FlagsEmpty then
-  begin
-    for i := 0 to High(FActiveFlags) do
-    begin
-      FlagId := FActiveFlags[i];
-      idx := -1;
-      if (FlagId >= 0) and (FlagId < Length(FSuffixFlagToIdx)) then
-        idx := FSuffixFlagToIdx[FlagId];
-      if idx < 0 then Continue;
-      Group := FSuffixRules[idx].Group;
-      for r := 0 to High(Group.Suffixes) do
-      begin
-        Rule := Group.Suffixes[r];
-        if UTF8EndsStr(Rule.Add, word) then
-        begin
-          CandidateStem := UTF8Copy(word, 1, UTF8Length(word) - UTF8Length(Rule.Add));
-          if Rule.Strip <> '' then CandidateStem := CandidateStem + Rule.Strip;
-          if MatchesCondition(Rule.Condition, CandidateStem, False) then
-          begin
-            if HashFind(CandidateStem, StemIndex) then
-            begin
-              if IsForbiddenWord(FWords[StemIndex].Flags) then Continue;
-              if HasFlag(FWords[StemIndex].Flags, FlagId) then Exit(True);
-            end;
-          end;
-        end;
-      end;
-    end;
-  end
+  ContFlags := [];
+  OutFlags := [];
+  SetLength(OutFlags, 0);
+  if W = '' then Exit;
+  if Depth > 2 then Exit;
+
+  WFound := HashFind(W, WIdx);
+  if WFound then WFlags := FWords[WIdx].Flags
   else
-  begin
-    for i := 0 to High(Flags) do
-    begin
-      FlagId := Flags[i];
-      idx := -1;
-      if (FlagId >= 0) and (FlagId < Length(FSuffixFlagToIdx)) then
-        idx := FSuffixFlagToIdx[FlagId];
-      if idx < 0 then Continue;
-      Group := FSuffixRules[idx].Group;
-      for r := 0 to High(Group.Suffixes) do
-      begin
-        Rule := Group.Suffixes[r];
-        if UTF8EndsStr(Rule.Add, word) then
-        begin
-          CandidateStem := UTF8Copy(word, 1, UTF8Length(word) - UTF8Length(Rule.Add));
-          if Rule.Strip <> '' then CandidateStem := CandidateStem + Rule.Strip;
-          if MatchesCondition(Rule.Condition, CandidateStem, False) then
-          begin
-            if HashFind(CandidateStem, StemIndex) then
-            begin
-              StemFlags := FWords[StemIndex].Flags;
-              if IsForbiddenWord(StemFlags) then Continue;
-              if HasFlag(StemFlags, FlagId) then Exit(True);
-            end;
-          end;
-        end;
-      end;
-    end;
-  end;
-end;
+    SetLength(WFlags, 0);
 
-function THunSpellChecker.TryApplyPrefixes(const word: string; const Flags: TIntegerArray): boolean;
-var
-  i, r, idx: integer;
-  FlagId: integer;
-  Group: TAffixGroup;
-  Rule: TPrefixRule;
-  CandidateStem: string;
-  StemIndex: integer;
-  FlagsEmpty: boolean;
-  StemFlags: TIntegerArray;
-begin
-  Result := False;
-  FlagsEmpty := Length(Flags) = 0;
-  if FlagsEmpty then
+  if WFound and not IsForbiddenWord(WFlags) then
   begin
-    for i := 0 to High(FActiveFlags) do
+    NeedAffix := (FNeedAffixFlag >= 0) and HasFlag(WFlags, FNeedAffixFlag);
+    if (FPseudoRootFlag >= 0) and HasFlag(WFlags, FPseudoRootFlag) then
+      NeedAffix := True;
+    OnlyInCompound := (FOnlyInCompoundFlag >= 0) and HasFlag(WFlags, FOnlyInCompoundFlag);
+    if not NeedAffix and (AllowOnlyInCompound or not OnlyInCompound) then
     begin
-      FlagId := FActiveFlags[i];
-      idx := -1;
-      if (FlagId >= 0) and (FlagId < Length(FPrefixFlagToIdx)) then
-        idx := FPrefixFlagToIdx[FlagId];
-      if idx < 0 then Continue;
-      Group := FPrefixRules[idx].Group;
-      for r := 0 to High(Group.Prefixes) do
-      begin
-        Rule := Group.Prefixes[r];
-        if UTF8StartsStr(Rule.Add, word) then
+      // Build candidate flags: WFlags plus all zero-affix continuations
+      SetLength(ContFlags, Length(WFlags));
+      for j := 0 to High(WFlags) do ContFlags[j] := WFlags[j];
+      for r := 0 to High(FZeroAffixEntries) do
+        if HasFlag(WFlags, FZeroAffixEntries[r].FlagId) then
         begin
-          CandidateStem := UTF8Copy(word, UTF8Length(Rule.Add) + 1, MaxInt);
-          if Rule.Strip <> '' then CandidateStem := Rule.Strip + CandidateStem;
-          if MatchesCondition(Rule.Condition, CandidateStem, True) then
-          begin
-            if HashFind(CandidateStem, StemIndex) then
-            begin
-              if IsForbiddenWord(FWords[StemIndex].Flags) then Continue;
-              if HasFlag(FWords[StemIndex].Flags, FlagId) then Exit(True);
-            end;
-          end;
+          k := Length(ContFlags);
+          SetLength(ContFlags, k + Length(FZeroAffixEntries[r].Continuation));
+          for j := 0 to High(FZeroAffixEntries[r].Continuation) do
+            ContFlags[k + j] := FZeroAffixEntries[r].Continuation[j];
         end;
-      end;
-    end;
-  end
-  else
-  begin
-    for i := 0 to High(Flags) do
-    begin
-      FlagId := Flags[i];
-      idx := -1;
-      if (FlagId >= 0) and (FlagId < Length(FPrefixFlagToIdx)) then
-        idx := FPrefixFlagToIdx[FlagId];
-      if idx < 0 then Continue;
-      Group := FPrefixRules[idx].Group;
-      for r := 0 to High(Group.Prefixes) do
+      // Return the direct hit only if it satisfies the caller's required flag.
+      // Otherwise fall through and try affix rule derivations.
+      if (RequiredFlag < 0) or HasFlag(ContFlags, RequiredFlag) then
       begin
-        Rule := Group.Prefixes[r];
-        if UTF8StartsStr(Rule.Add, word) then
-        begin
-          CandidateStem := UTF8Copy(word, UTF8Length(Rule.Add) + 1, MaxInt);
-          if Rule.Strip <> '' then CandidateStem := Rule.Strip + CandidateStem;
-          if MatchesCondition(Rule.Condition, CandidateStem, True) then
-          begin
-            if HashFind(CandidateStem, StemIndex) then
-            begin
-              StemFlags := FWords[StemIndex].Flags;
-              if IsForbiddenWord(StemFlags) then Continue;
-              if HasFlag(StemFlags, FlagId) then Exit(True);
-            end;
-          end;
-        end;
+        OutFlags := ContFlags;
+        Exit(True);
       end;
-    end;
-  end;
-end;
-
-function THunSpellChecker.TryApplyCrossProduct(const word: string; const Flags: TIntegerArray): boolean;
-var
-  suffixFlagIndex, prefixFlagIndex, suffixRuleIndex, prefixRuleIndex: integer;
-  suffixFlagId, prefixFlagId: integer;
-  suffixGroup, prefixGroup: TAffixGroup;
-  suffixRule: TSuffixRule;
-  prefixRule: TPrefixRule;
-  candidateAfterSuffix, candidateAfterPrefix, finalStem: string;
-  stemIndex: integer;
-  stemFlags: TIntegerArray;
-  suffixIsCircumfix, prefixIsCircumfix, stemHasCircumfix: boolean;
-  sidx, pidx: integer;
-begin
-  Result := False;
-
-  // Suffix then prefix
-  for suffixFlagIndex := 0 to High(FCrossSuffixFlags) do
-  begin
-    suffixFlagId := FCrossSuffixFlags[suffixFlagIndex];
-    if (Length(Flags) > 0) and not HasFlag(Flags, suffixFlagId) then Continue;
-    sidx := -1;
-    if (suffixFlagId >= 0) and (suffixFlagId < Length(FSuffixFlagToIdx)) then
-      sidx := FSuffixFlagToIdx[suffixFlagId];
-    if sidx < 0 then Continue;
-    suffixGroup := FSuffixRules[sidx].Group;
-    suffixIsCircumfix := (suffixFlagId = FCircumfixFlag);
-    for suffixRuleIndex := 0 to High(suffixGroup.Suffixes) do
-    begin
-      suffixRule := suffixGroup.Suffixes[suffixRuleIndex];
-      if UTF8EndsStr(suffixRule.Add, word) then
-      begin
-        candidateAfterSuffix := UTF8Copy(word, 1, UTF8Length(word) - UTF8Length(suffixRule.Add));
-        if suffixRule.Strip <> '' then candidateAfterSuffix := candidateAfterSuffix + suffixRule.Strip;
-        if MatchesCondition(suffixRule.Condition, candidateAfterSuffix, False) then
-        begin
-          for prefixFlagIndex := 0 to High(FCrossPrefixFlags) do
-          begin
-            prefixFlagId := FCrossPrefixFlags[prefixFlagIndex];
-            if (Length(Flags) > 0) and not HasFlag(Flags, prefixFlagId) then Continue;
-            pidx := -1;
-            if (prefixFlagId >= 0) and (prefixFlagId < Length(FPrefixFlagToIdx)) then
-              pidx := FPrefixFlagToIdx[prefixFlagId];
-            if pidx < 0 then Continue;
-            prefixGroup := FPrefixRules[pidx].Group;
-            prefixIsCircumfix := (prefixFlagId = FCircumfixFlag);
-            for prefixRuleIndex := 0 to High(prefixGroup.Prefixes) do
-            begin
-              prefixRule := prefixGroup.Prefixes[prefixRuleIndex];
-              if UTF8StartsStr(prefixRule.Add, candidateAfterSuffix) then
-              begin
-                finalStem := UTF8Copy(candidateAfterSuffix, UTF8Length(prefixRule.Add) + 1, MaxInt);
-                if prefixRule.Strip <> '' then finalStem := prefixRule.Strip + finalStem;
-                if MatchesCondition(prefixRule.Condition, finalStem, True) then
-                begin
-                  if HashFind(finalStem, stemIndex) then
-                  begin
-                    stemFlags := FWords[stemIndex].Flags;
-                    if IsForbiddenWord(stemFlags) then Continue;
-                    stemHasCircumfix := HasFlag(stemFlags, FCircumfixFlag);
-                    if stemHasCircumfix then
-                    begin
-                      if not (suffixIsCircumfix and prefixIsCircumfix) then Continue;
-                    end
-                    else
-                    begin
-                      if suffixIsCircumfix or prefixIsCircumfix then Continue;
-                    end;
-                    if HasFlag(stemFlags, suffixFlagId) and HasFlag(stemFlags, prefixFlagId) then
-                      Exit(True);
-                  end;
-                end;
-              end;
-            end;
-          end;
-        end;
-      end;
-    end;
+      if Depth >= 2 then Exit(False);
+    end
+    else if Depth > 0 then
+      Exit(False);
   end;
 
-  // Prefix then suffix
-  for prefixFlagIndex := 0 to High(FCrossPrefixFlags) do
-  begin
-    prefixFlagId := FCrossPrefixFlags[prefixFlagIndex];
-    if (Length(Flags) > 0) and not HasFlag(Flags, prefixFlagId) then Continue;
-    pidx := -1;
-    if (prefixFlagId >= 0) and (prefixFlagId < Length(FPrefixFlagToIdx)) then
-      pidx := FPrefixFlagToIdx[prefixFlagId];
-    if pidx < 0 then Continue;
-    prefixGroup := FPrefixRules[pidx].Group;
-    prefixIsCircumfix := (prefixFlagId = FCircumfixFlag);
-    for prefixRuleIndex := 0 to High(prefixGroup.Prefixes) do
-    begin
-      prefixRule := prefixGroup.Prefixes[prefixRuleIndex];
-      if UTF8StartsStr(prefixRule.Add, word) then
-      begin
-        candidateAfterPrefix := UTF8Copy(word, UTF8Length(prefixRule.Add) + 1, MaxInt);
-        if prefixRule.Strip <> '' then candidateAfterPrefix := prefixRule.Strip + candidateAfterPrefix;
-        if MatchesCondition(prefixRule.Condition, candidateAfterPrefix, True) then
-        begin
-          for suffixFlagIndex := 0 to High(FCrossSuffixFlags) do
-          begin
-            suffixFlagId := FCrossSuffixFlags[suffixFlagIndex];
-            if (Length(Flags) > 0) and not HasFlag(Flags, suffixFlagId) then Continue;
-            sidx := -1;
-            if (suffixFlagId >= 0) and (suffixFlagId < Length(FSuffixFlagToIdx)) then
-              sidx := FSuffixFlagToIdx[suffixFlagId];
-            if sidx < 0 then Continue;
-            suffixGroup := FSuffixRules[sidx].Group;
-            suffixIsCircumfix := (suffixFlagId = FCircumfixFlag);
-            for suffixRuleIndex := 0 to High(suffixGroup.Suffixes) do
-            begin
-              suffixRule := suffixGroup.Suffixes[suffixRuleIndex];
-              if UTF8EndsStr(suffixRule.Add, candidateAfterPrefix) then
-              begin
-                finalStem := UTF8Copy(candidateAfterPrefix, 1, UTF8Length(candidateAfterPrefix) - UTF8Length(suffixRule.Add));
-                if suffixRule.Strip <> '' then finalStem := finalStem + suffixRule.Strip;
-                if MatchesCondition(suffixRule.Condition, finalStem, False) then
-                begin
-                  if HashFind(finalStem, stemIndex) then
-                  begin
-                    stemFlags := FWords[stemIndex].Flags;
-                    if IsForbiddenWord(stemFlags) then Continue;
-                    stemHasCircumfix := HasFlag(stemFlags, FCircumfixFlag);
-                    if stemHasCircumfix then
-                    begin
-                      if not (suffixIsCircumfix and prefixIsCircumfix) then Continue;
-                    end
-                    else
-                    begin
-                      if suffixIsCircumfix or prefixIsCircumfix then Continue;
-                    end;
-                    if HasFlag(stemFlags, suffixFlagId) and HasFlag(stemFlags, prefixFlagId) then
-                      Exit(True);
-                  end;
-                end;
-              end;
-            end;
-          end;
-        end;
-      end;
-    end;
-  end;
-end;
+  if Depth >= 2 then Exit(False);
 
-function THunSpellChecker.TryApplyAffixes(const word: string; const Flags: TIntegerArray): boolean;
-begin
-  Result := TryApplySuffixes(word, Flags) or TryApplyPrefixes(word, Flags);
+  // ---- Suffix rules ----
+  LastByte := Ord(W[Length(W)]);
+  for r := 0 to High(FSuffixByLastByte[LastByte]) do
+  begin
+    FlatIdx := FSuffixByLastByte[LastByte][r];
+    FSR := FSuffixFlat[FlatIdx];
+
+    if FSR.IsEmpty then
+    begin
+      if WFound and HasFlag(WFlags, FSR.FlagId) and not IsForbiddenWord(WFlags) then
+        if (RequiredFlag < 0) or HasFlag(FSR.Continuation, RequiredFlag) then
+        begin
+          SetLength(OutFlags, Length(FSR.Continuation));
+          for k := 0 to High(FSR.Continuation) do
+            OutFlags[k] := FSR.Continuation[k];
+          Exit(True);
+        end;
+      Continue;
+    end;
+
+    if not ByteEndsWith(FSR.Add, W) then Continue;
+    Prev := Copy(W, 1, Length(W) - Length(FSR.Add));
+    if FSR.Strip <> '' then Prev := Prev + FSR.Strip;
+    if not MatchesCondition(FSR.Condition, FSR.WideCondition, Prev, False) then Continue;
+    // The stem must carry the rule's own flag
+    if TryDerive(Prev, Depth + 1, AllowOnlyInCompound, FSR.FlagId, PrevFlags) then
+      if (RequiredFlag < 0) or HasFlag(FSR.Continuation, RequiredFlag) then
+      begin
+        SetLength(OutFlags, Length(FSR.Continuation));
+        for k := 0 to High(FSR.Continuation) do
+          OutFlags[k] := FSR.Continuation[k];
+        Exit(True);
+      end;
+  end;
+
+  // ---- Prefix rules ----
+  FirstByte := Ord(W[1]);
+  for r := 0 to High(FPrefixByFirstByte[FirstByte]) do
+  begin
+    FlatIdx := FPrefixByFirstByte[FirstByte][r];
+    FPR := FPrefixFlat[FlatIdx];
+
+    if FPR.IsEmpty then
+    begin
+      if WFound and HasFlag(WFlags, FPR.FlagId) and not IsForbiddenWord(WFlags) then
+        if (RequiredFlag < 0) or HasFlag(FPR.Continuation, RequiredFlag) then
+        begin
+          SetLength(OutFlags, Length(FPR.Continuation));
+          for k := 0 to High(FPR.Continuation) do
+            OutFlags[k] := FPR.Continuation[k];
+          Exit(True);
+        end;
+      Continue;
+    end;
+
+    if not ByteStartsWith(FPR.Add, W) then Continue;
+    Prev := Copy(W, Length(FPR.Add) + 1, MaxInt);
+    if FPR.Strip <> '' then Prev := FPR.Strip + Prev;
+    if not MatchesCondition(FPR.Condition, FPR.WideCondition, Prev, True) then Continue;
+    if TryDerive(Prev, Depth + 1, AllowOnlyInCompound, FPR.FlagId, PrevFlags) then
+      if (RequiredFlag < 0) or HasFlag(FPR.Continuation, RequiredFlag) then
+      begin
+        SetLength(OutFlags, Length(FPR.Continuation));
+        for k := 0 to High(FPR.Continuation) do
+          OutFlags[k] := FPR.Continuation[k];
+        Exit(True);
+      end;
+  end;
 end;
 
 function THunSpellChecker.GetWordFlags(const word: string): TIntegerArray;
@@ -2112,11 +2413,31 @@ end;
 function THunSpellChecker.ApplyIconv(const S: string): string;
 var
   i: integer;
+  NeedsConv: boolean;
 begin
   Result := S;
   if Length(FIconvFrom) = 0 then Exit;
+  // Skip conversion when no byte in the string can start any ICONV pattern
+  NeedsConv := False;
+  for i := 1 to Length(S) do
+    if FIconvFirstBytes[Ord(S[i])] then
+    begin
+      NeedsConv := True;
+      Break;
+    end;
+  if not NeedsConv then Exit;
   for i := 0 to High(FIconvFrom) do
     Result := StringReplace(Result, FIconvFrom[i], FIconvTo[i], [rfReplaceAll]);
+end;
+
+function THunSpellChecker.ApplyOconv(const S: string): string;
+var
+  i: integer;
+begin
+  Result := S;
+  if Length(FOCONVFrom) = 0 then Exit;
+  for i := 0 to High(FOCONVFrom) do
+    Result := StringReplace(Result, FOCONVFrom[i], FOCONVTo[i], [rfReplaceAll]);
 end;
 
 // ---------------------------------------------------------------------------------
@@ -2202,97 +2523,211 @@ begin
   Result := (FForbiddenWordFlag >= 0) and HasFlag(Flags, FForbiddenWordFlag);
 end;
 
+// Helper: check if a candidate compound part passes CHECKCOMPOUNDPATTERN
+function THunSpellChecker.MatchesCompoundPattern(const LeftPart, RightPart: string; const LeftFlags, RightFlags: TIntegerArray): boolean;
+var
+  pi, i: integer;
+  P: TCompoundPattern;
+  OkEnd, OkBegin: boolean;
+begin
+  Result := False;
+  for pi := 0 to High(FCheckCompoundPatterns) do
+  begin
+    P := FCheckCompoundPatterns[pi];
+    OkEnd := False;
+    OkBegin := False;
+
+    if (P.EndChars <> '') and ByteEndsWith(P.EndChars, LeftPart) then OkEnd := True
+    else if Length(P.EndFlags) > 0 then
+    begin
+      for i := 0 to High(P.EndFlags) do
+        if HasFlag(LeftFlags, P.EndFlags[i]) then
+        begin
+          OkEnd := True;
+          Break;
+        end;
+    end;
+
+    if (P.BeginChars <> '') and ByteStartsWith(P.BeginChars, RightPart) then OkBegin := True
+    else if Length(P.BeginFlags) > 0 then
+    begin
+      for i := 0 to High(P.BeginFlags) do
+        if HasFlag(RightFlags, P.BeginFlags[i]) then
+        begin
+          OkBegin := True;
+          Break;
+        end;
+    end;
+
+    if OkEnd and OkBegin then Exit(True);
+  end;
+end;
+
+// Find a compound part: a dictionary entry or a derived form via TryDerive,
+// which uses continuation flags to chain suffixes and prefixes
+function THunSpellChecker.TryGetPartFlags(const Part: string; out OutFlags: TIntegerArray): boolean;
+var
+  Count: integer = 0;
+  TempFlags: TIntegerArray = nil;
+begin
+  Result := TryDerive(Part, 0, True, -1, OutFlags);
+  if Result then Exit;
+
+  // A nested compound only makes sense when compound flags are defined
+  if (FCompoundFlag < 0) and (FCompoundBegin < 0) and (FCompoundMiddle < 0) and (FCompoundEnd < 0) then Exit;
+
+  if FCompoundRecurse >= 1 then Exit;
+  Inc(FCompoundRecurse);
+  try
+    if TryCompoundWordRec(Part, 0) then
+    begin
+      SetLength(TempFlags, 4);
+      if FCompoundFlag >= 0 then
+      begin
+        TempFlags[Count] := FCompoundFlag;
+        Inc(Count);
+      end;
+      if FCompoundBegin >= 0 then
+      begin
+        TempFlags[Count] := FCompoundBegin;
+        Inc(Count);
+      end;
+      if FCompoundMiddle >= 0 then
+      begin
+        TempFlags[Count] := FCompoundMiddle;
+        Inc(Count);
+      end;
+      if FCompoundEnd >= 0 then
+      begin
+        TempFlags[Count] := FCompoundEnd;
+        Inc(Count);
+      end;
+      SetLength(TempFlags, Count);
+      OutFlags := TempFlags;
+      Result := True;
+    end;
+  finally
+    Dec(FCompoundRecurse);
+  end;
+end;
+
+function THunSpellChecker.PartCanCompoundLeft(const Flags: TIntegerArray): boolean;
+begin
+  Result := False;
+  if (FCompoundFlag >= 0) and HasFlag(Flags, FCompoundFlag) then Exit(True);
+  if (FCompoundBegin >= 0) and HasFlag(Flags, FCompoundBegin) then Exit(True);
+end;
+
+function THunSpellChecker.PartCanCompoundMiddle(const Flags: TIntegerArray): boolean;
+begin
+  Result := False;
+  if (FCompoundFlag >= 0) and HasFlag(Flags, FCompoundFlag) then Exit(True);
+  if (FCompoundMiddle >= 0) and HasFlag(Flags, FCompoundMiddle) then Exit(True);
+end;
+
+function THunSpellChecker.PartCanCompoundRight(const Flags: TIntegerArray): boolean;
+begin
+  Result := False;
+  if (FCompoundFlag >= 0) and HasFlag(Flags, FCompoundFlag) then Exit(True);
+  if (FCompoundEnd >= 0) and HasFlag(Flags, FCompoundEnd) then Exit(True);
+end;
+
 function THunSpellChecker.TryCompoundWord(const word: string): boolean;
 var
-  i, idx: integer;
-  leftPart, rightPart: string;
-  leftFlags, rightFlags: TIntegerArray;
-  lenWord: integer;
-  Rule: string;
-  j: integer;
-  LeftFlag, RightFlag: string;
-  LeftFlagId, RightFlagId: integer;
+  LowerWord: string;
 begin
   Result := False;
   if word = '' then Exit;
+  // A capitalised compound is also checked in lowercase form
+  LowerWord := UTF8LowerCase(word);
+  if LowerWord <> word then
+    if TryCompoundWord(LowerWord) then Exit(True);
+  Result := TryCompoundWordRec(word, 0);
+end;
+
+// Recursive compound splitter. Depth 0 splits the first part, deeper levels split
+// the rest. The maximum number of parts is limited by COMPOUNDWORDMAX when present,
+// otherwise by an internal limit of 4.
+function THunSpellChecker.TryCompoundWordRec(const word: string; depth: integer): boolean;
+var
+  i, lenWord, minPart, maxParts: integer;
+  leftPart, rightPart: string;
+  leftFlags: TIntegerArray = ();
+  rightFlags: TIntegerArray = ();
+  leftOk: boolean;
+  LastLeft: string;
+  FirstRight: string;
+begin
+  Result := False;
+  if word = '' then Exit;
+
+  maxParts := FCompoundWordMax;
+  if maxParts < 2 then maxParts := 4;
+  if depth >= maxParts - 1 then Exit;
+
   lenWord := UTF8Length(word);
+  if lenWord < 2 then Exit;
 
-  if Length(FCompoundRules) > 0 then
+  minPart := FCompoundMin;
+  if minPart < 1 then minPart := 1;
+  if lenWord < minPart * 2 then Exit;
+
+  for i := minPart to lenWord - minPart do
   begin
-    for j := 0 to High(FCompoundRules) do
+    leftPart := UTF8Copy(word, 1, i);
+    rightPart := UTF8Copy(word, i + 1, MaxInt);
+
+    // CHECKCOMPOUNDDUP: reject identical adjacent parts
+    if FCheckCompoundDup and (leftPart = rightPart) then Continue;
+
+    // CHECKCOMPOUNDCASE: reject a compound border that mixes letter cases
+    if FCheckCompoundCase and (leftPart <> '') and (rightPart <> '') then
     begin
-      Rule := FCompoundRules[j];
-      i := Pos('*', Rule);
-      if i = 0 then Continue;
-      LeftFlag := Copy(Rule, 1, i - 1);
-      RightFlag := Copy(Rule, i + 1, MaxInt);
-      i := Pos('*', RightFlag);
-      if i > 0 then RightFlag := Copy(RightFlag, 1, i - 1);
-      LeftFlagId := InternFlag(LeftFlag);
-      RightFlagId := InternFlag(RightFlag);
+      LastLeft := UTF8Copy(leftPart, UTF8Length(leftPart), 1);
+      FirstRight := UTF8Copy(rightPart, 1, 1);
+      if (LastLeft = UTF8UpperCase(LastLeft)) and (LastLeft <> UTF8LowerCase(LastLeft)) then
+        Continue;
+      if (FirstRight = UTF8UpperCase(FirstRight)) and (FirstRight <> UTF8LowerCase(FirstRight)) then
+        Continue;
+    end;
 
-      for i := 1 to lenWord - 1 do
+    // Left part: dictionary entry or suffix-derived form
+    if not TryGetPartFlags(leftPart, leftFlags) then Continue;
+
+    if depth = 0 then
+      leftOk := PartCanCompoundLeft(leftFlags)
+    else
+      leftOk := PartCanCompoundMiddle(leftFlags);
+    if not leftOk then Continue;
+
+    // Option 1: right part is the final part of the compound
+    if TryGetPartFlags(rightPart, rightFlags) then
+    begin
+      if PartCanCompoundRight(rightFlags) then
       begin
-        leftPart := UTF8Copy(word, 1, i);
-        rightPart := UTF8Copy(word, i + 1, MaxInt);
-        if not HashFind(leftPart, idx) then
+        if not MatchesCompoundPattern(leftPart, rightPart, leftFlags, rightFlags) then
         begin
-          if not TryApplyAffixes(leftPart, nil) then Continue;
-          if not HashFind(leftPart, idx) then Continue;
+          Result := True;
+          Exit;
         end;
-        leftFlags := FWords[idx].Flags;
-        if IsForbiddenWord(leftFlags) then Continue;
-        if not HasFlag(leftFlags, LeftFlagId) then Continue;
-
-        if not HashFind(rightPart, idx) then
+      end
+      else
+      begin
+        // Fallback: if the right part is a valid word without Cc, allow it
+        // This handles dictionaries where plural or derived forms do not inherit COMPOUNDEND
+        if not IsNoSuggestWord(rightFlags) and not IsForbiddenWord(rightFlags) then
         begin
-          if not TryApplyAffixes(rightPart, nil) then Continue;
-          if not HashFind(rightPart, idx) then Continue;
+          if not MatchesCompoundPattern(leftPart, rightPart, leftFlags, rightFlags) then
+          begin
+            Result := True;
+            Exit;
+          end;
         end;
-        rightFlags := FWords[idx].Flags;
-        if IsForbiddenWord(rightFlags) then Continue;
-        if not HasFlag(rightFlags, RightFlagId) then Continue;
-
-        Result := True;
-        Exit;
       end;
     end;
-    Exit;
-  end
-  else
-  begin
-    for i := 1 to lenWord - 1 do
-    begin
-      leftPart := UTF8Copy(word, 1, i);
-      rightPart := UTF8Copy(word, i + 1, MaxInt);
-      if not HashFind(leftPart, idx) then
-      begin
-        if not TryApplyAffixes(leftPart, nil) then Continue;
-        if not HashFind(leftPart, idx) then Continue;
-      end;
-      leftFlags := FWords[idx].Flags;
-      if IsForbiddenWord(leftFlags) then Continue;
 
-      if not HashFind(rightPart, idx) then
-      begin
-        if not TryApplyAffixes(rightPart, nil) then Continue;
-        if not HashFind(rightPart, idx) then Continue;
-      end;
-      rightFlags := FWords[idx].Flags;
-      if IsForbiddenWord(rightFlags) then Continue;
-
-      if FCompoundFlag >= 0 then
-      begin
-        if not HasFlag(leftFlags, FCompoundFlag) and not HasFlag(leftFlags, FCompoundBegin) and not
-          HasFlag(leftFlags, FCompoundMiddle) then Continue;
-        if not HasFlag(rightFlags, FCompoundFlag) and not HasFlag(rightFlags, FCompoundEnd) and not
-          HasFlag(rightFlags, FCompoundMiddle) then Continue;
-        if (i = 1) and (FCompoundBegin >= 0) and (not HasFlag(leftFlags, FCompoundBegin)) then Continue;
-        if (i = lenWord - 1) and (FCompoundEnd >= 0) and (not HasFlag(rightFlags, FCompoundEnd)) then Continue;
-      end;
-      Result := True;
-      Exit;
-    end;
+    // Option 2: right part contains further compound parts
+    if TryCompoundWordRec(rightPart, depth + 1) then Exit(True);
   end;
 end;
 
@@ -2313,20 +2748,20 @@ begin
 
     if (Length(pattern) > 0) and (pattern[1] = '^') then
     begin
-      if UTF8StartsStr(searchStr, word) then
+      if ByteStartsWith(searchStr, word) then
       begin
         rightPart := UTF8Copy(word, UTF8Length(searchStr) + 1, MaxInt);
         if rightPart <> '' then
-          if CheckWordInternal(rightPart, False) then Exit(True);
+          if CheckWordCore(rightPart, False) then Exit(True);
       end;
     end
     else if (Length(pattern) > 0) and (pattern[Length(pattern)] = '$') then
     begin
-      if UTF8EndsStr(searchStr, word) then
+      if ByteEndsWith(searchStr, word) then
       begin
         leftPart := UTF8Copy(word, 1, UTF8Length(word) - UTF8Length(searchStr));
         if leftPart <> '' then
-          if CheckWordInternal(leftPart, False) then Exit(True);
+          if CheckWordCore(leftPart, False) then Exit(True);
       end;
     end
     else
@@ -2338,7 +2773,7 @@ begin
         rightPart := UTF8Copy(word, pos + UTF8Length(searchStr), MaxInt);
         if (leftPart <> '') and (rightPart <> '') then
         begin
-          if CheckWordInternal(leftPart, False) and CheckWordInternal(rightPart, False) then Exit(True);
+          if CheckWordCore(leftPart, False) and CheckWordCore(rightPart, False) then Exit(True);
         end;
         pos := UTF8Pos(searchStr, word, pos + 1);
       end;
@@ -2350,65 +2785,116 @@ end;
 // Word checking
 // ---------------------------------------------------------------------------------
 
-function THunSpellChecker.CheckWordInternal(const word: string; AllowBreak: boolean): boolean;
+// Core check for a single form. Assumes the word has already been iconv-cleaned
+// and had IGNORE characters removed. Handles direct lookup, lowercase fallback,
+// affix derivation, compound words and BREAK patterns.
+function THunSpellChecker.CheckWordCore(const word: string; AllowBreak: boolean): boolean;
 var
   idx: integer;
-  CleanWord: string;
   LowerWord: string;
   Flags: TIntegerArray;
-  EmptyFlags: TIntegerArray = nil;
+  DerivedFlags: TIntegerArray = nil;
+  KeepCase: boolean;
 begin
-  SetLength(EmptyFlags, 0);
-  CleanWord := ApplyIconv(word);
-  CleanWord := RemoveIgnoreChars(CleanWord, FIgnoreChars);
+  if word = '' then Exit(False);
   // A word made of digits only is always considered valid
-  if IsNumericWord(CleanWord) then Exit(True);
-  if HashFind(CleanWord, idx) then
+  if IsNumericWord(word) then Exit(True);
+
+  // Direct match in DIC
+  if HashFind(word, idx) then
   begin
     Flags := FWords[idx].Flags;
-    if IsForbiddenWord(Flags) then Exit(False);
-    if (FOnlyInCompoundFlag >= 0) and HasFlag(Flags, FOnlyInCompoundFlag) then Exit(False);
-    if ((FNeedAffixFlag >= 0) and HasFlag(Flags, FNeedAffixFlag)) or ((FPseudoRootFlag >= 0) and HasFlag(Flags, FPseudoRootFlag)) then
+    if not IsForbiddenWord(Flags) then
     begin
-      if TryApplyAffixes(CleanWord, Flags) then Exit(True);
-      if TryApplyCrossProduct(CleanWord, Flags) then Exit(True);
-      Exit(False);
+      if not ((FOnlyInCompoundFlag >= 0) and HasFlag(Flags, FOnlyInCompoundFlag)) and not
+        ((FNeedAffixFlag >= 0) and HasFlag(Flags, FNeedAffixFlag)) and not ((FPseudoRootFlag >= 0) and
+        HasFlag(Flags, FPseudoRootFlag)) then
+        Exit(True);
     end;
-    Exit(True);
   end;
-  if IsCompoundNumber(CleanWord) then Exit(True);
 
-  LowerWord := UTF8LowerCase(CleanWord);
-  if LowerWord <> CleanWord then
+  if IsCompoundNumber(word) then Exit(True);
+
+  // Lowercase fallback, but not for KEEPCASE entries
+  LowerWord := UTF8LowerCase(word);
+  if LowerWord <> word then
   begin
     if HashFind(LowerWord, idx) then
     begin
       Flags := FWords[idx].Flags;
-      if not IsForbiddenWord(Flags) and not ((FOnlyInCompoundFlag >= 0) and HasFlag(Flags, FOnlyInCompoundFlag)) and
-        not ((FNeedAffixFlag >= 0) and HasFlag(Flags, FNeedAffixFlag)) and not ((FPseudoRootFlag >= 0) and
-        HasFlag(Flags, FPseudoRootFlag)) then
-        Exit(True);
-      if ((FNeedAffixFlag >= 0) and HasFlag(Flags, FNeedAffixFlag)) or ((FPseudoRootFlag >= 0) and
-        HasFlag(Flags, FPseudoRootFlag)) then
+      KeepCase := (FKeepCaseFlag >= 0) and HasFlag(Flags, FKeepCaseFlag);
+      if not KeepCase then
       begin
-        if TryApplyAffixes(LowerWord, Flags) then Exit(True);
-        if TryApplyCrossProduct(LowerWord, Flags) then Exit(True);
+        if not IsForbiddenWord(Flags) and not ((FOnlyInCompoundFlag >= 0) and HasFlag(Flags, FOnlyInCompoundFlag)) and
+          not ((FNeedAffixFlag >= 0) and HasFlag(Flags, FNeedAffixFlag)) and not
+          ((FPseudoRootFlag >= 0) and HasFlag(Flags, FPseudoRootFlag)) then
+          Exit(True);
       end;
     end;
-    if TryApplyAffixes(LowerWord, EmptyFlags) then Exit(True);
-    if TryApplyCrossProduct(LowerWord, EmptyFlags) then Exit(True);
   end;
 
-  if TryApplyAffixes(CleanWord, EmptyFlags) then Exit(True);
-  if TryApplyCrossProduct(CleanWord, EmptyFlags) then Exit(True);
+  // Derived forms via affixes with continuation flag chaining
+  if TryDerive(word, 0, False, -1, DerivedFlags) then Exit(True);
+  if (LowerWord <> word) and TryDerive(LowerWord, 0, False, -1, DerivedFlags) then Exit(True);
 
   if AllowBreak and (FBreakPatterns.Count > 0) then
-    if TryBreakWord(CleanWord) then Exit(True);
+    if TryBreakWord(word) then Exit(True);
 
-  if FCompoundFlag >= 0 then
-    if TryCompoundWord(CleanWord) then Exit(True);
+  if (FCompoundFlag >= 0) or (FCompoundBegin >= 0) or (FCompoundMiddle >= 0) or (FCompoundEnd >= 0) then
+    if TryCompoundWord(word) then Exit(True);
 
   Result := False;
+end;
+
+// Public entry point for a single token. If the token ends with trailing dots
+// (which can happen when '.' is part of WORDCHARS, as in the Dutch dictionary)
+// and the raw form is not found, the dots are stripped and the check is retried.
+function THunSpellChecker.CheckWordInternal(const word: string; AllowBreak: boolean): boolean;
+var
+  CleanWord: string;
+  TrimmedWord: string;
+  TailChar: string;
+  TailCode: cardinal;
+  InWordChars: boolean;
+  IsLetterOrDigit: boolean;
+  i: integer;
+begin
+  CleanWord := ApplyIconv(word);
+  CleanWord := RemoveIgnoreChars(CleanWord, FIgnoreChars);
+
+  if CheckWordCore(CleanWord, AllowBreak) then Exit(True);
+
+  // Strip trailing punctuation that is listed in WORDCHARS and retry
+  // This handles cases like "parametrar:" where ':' is a word character
+  TrimmedWord := CleanWord;
+  while TrimmedWord <> '' do
+  begin
+    TailChar := UTF8Copy(TrimmedWord, UTF8Length(TrimmedWord), 1);
+    TailCode := FirstCodepoint(TailChar);
+
+    IsLetterOrDigit := False;
+    {$NOTES OFF}
+    if TailCode <= $FFFF then
+      IsLetterOrDigit := TCharacter.IsLetterOrDigit(widechar(TailCode));
+    {$NOTES ON}
+    if IsLetterOrDigit then Break;
+
+    InWordChars := False;
+    for i := 0 to High(FWordCharsCodes) do
+      if FWordCharsCodes[i] = TailCode then
+      begin
+        InWordChars := True;
+        Break;
+      end;
+    if not InWordChars then Break;
+
+    UTF8Delete(TrimmedWord, UTF8Length(TrimmedWord), 1);
+  end;
+
+  if (TrimmedWord <> '') and (TrimmedWord <> CleanWord) then
+    Result := CheckWordCore(TrimmedWord, AllowBreak)
+  else
+    Result := False;
 end;
 
 function THunSpellChecker.CheckWord(const word: string): boolean;
@@ -2443,8 +2929,10 @@ begin
     if FWordCharsCodes[i] = CodePoint then Exit(True);
 
   // Any character that has an ICONV mapping is also treated as part of a word
+  // Fast path: skip the loop when the first byte cannot match any ICONV source
   if Length(FIconvFrom) > 0 then
   begin
+    if not FIconvFirstBytes[Ord(Ch^)] then Exit(False);
     SetLength(ChStr, CharLen);
     Move(Ch^, ChStr[1], CharLen);
     for i := 0 to High(FIconvFrom) do
@@ -2497,7 +2985,10 @@ begin
           Err.Offset := WordStartChar;
           Err.Length := WordLengthChars;
           Err.Message := 'Unknown word';
-          Err.Replacements := Suggest(word);
+          if FIncludeSuggestions then
+            Err.Replacements := Suggest(word)
+          else
+            SetLength(Err.Replacements, 0);
           Err.Color := clRed;
           SetLength(Result, Length(Result) + 1);
           Result[High(Result)] := Err;
@@ -2516,7 +3007,10 @@ begin
       Err.Offset := WordStartChar;
       Err.Length := WordLengthChars;
       Err.Message := 'Unknown word';
-      Err.Replacements := Suggest(word);
+      if FIncludeSuggestions then
+        Err.Replacements := Suggest(word)
+      else
+        SetLength(Err.Replacements, 0);
       Err.Color := clRed;
       SetLength(Result, Length(Result) + 1);
       Result[High(Result)] := Err;
@@ -2535,6 +3029,7 @@ var
 begin
   SetLength(FAllWords, FWordCount);
   SetLength(FAllWordsLower, FWordCount);
+  SetLength(FAllWordsLowerWide, FWordCount);
   SetLength(FAllWordsFirstChar, FWordCount);
   MaxLen := 0;
 
@@ -2542,6 +3037,7 @@ begin
   begin
     FAllWords[i] := FWords[i].word;
     FAllWordsLower[i] := UTF8LowerCase(FAllWords[i]);
+    FAllWordsLowerWide[i] := UTF8Decode(FAllWordsLower[i]);
     FAllWordsFirstChar[i] := FirstCodepoint(FAllWordsLower[i]);
     Len := UTF8Length(FAllWords[i]);
     if Len > MaxLen then MaxLen := Len;
@@ -2602,16 +3098,16 @@ begin
       idx := FSuffixFlagToIdx[FlagId];
     if idx < 0 then Continue;
     Group := FSuffixRules[idx].Group;
-    for r := 0 to High(Group.Suffixes) do
+    for r := 0 to Group.SuffixCount - 1 do
     begin
       RuleS := Group.Suffixes[r];
-      if (RuleS.Strip <> '') and (not UTF8EndsStr(RuleS.Strip, BaseWord)) then Continue;
-      if not MatchesCondition(RuleS.Condition, BaseWord, False) then Continue;
+      if (RuleS.Strip <> '') and (not ByteEndsWith(RuleS.Strip, BaseWord)) then Continue;
+      if not MatchesCondition(RuleS.Condition, RuleS.WideCondition, BaseWord, False) then Continue;
       Stripped := BaseWord;
       if RuleS.Strip <> '' then
-        UTF8Delete(Stripped, UTF8Length(Stripped) - UTF8Length(RuleS.Strip) + 1, UTF8Length(RuleS.Strip));
+        Delete(Stripped, Length(Stripped) - Length(RuleS.Strip) + 1, Length(RuleS.Strip));
       Form := Stripped + RuleS.Add;
-      Dist := LevenshteinDistance(TargetWordLower, UTF8LowerCase(Form));
+      Dist := LevenshteinDistanceLimited(TargetWordLower, UTF8LowerCase(Form), 2);
       if (Dist <= 2) and (Form <> TargetWordLower) then
         AddWeightedSuggestion(Suggestions, Form, Dist);
     end;
@@ -2626,16 +3122,16 @@ begin
       idx := FPrefixFlagToIdx[FlagId];
     if idx < 0 then Continue;
     Group := FPrefixRules[idx].Group;
-    for r := 0 to High(Group.Prefixes) do
+    for r := 0 to Group.PrefixCount - 1 do
     begin
       RuleP := Group.Prefixes[r];
-      if (RuleP.Strip <> '') and (not UTF8StartsStr(RuleP.Strip, BaseWord)) then Continue;
-      if not MatchesCondition(RuleP.Condition, BaseWord, True) then Continue;
+      if (RuleP.Strip <> '') and (not ByteStartsWith(RuleP.Strip, BaseWord)) then Continue;
+      if not MatchesCondition(RuleP.Condition, RuleP.WideCondition, BaseWord, True) then Continue;
       Stripped := BaseWord;
       if RuleP.Strip <> '' then
-        UTF8Delete(Stripped, 1, UTF8Length(RuleP.Strip));
+        Delete(Stripped, 1, Length(RuleP.Strip));
       Form := RuleP.Add + Stripped;
-      Dist := LevenshteinDistance(TargetWordLower, UTF8LowerCase(Form));
+      Dist := LevenshteinDistanceLimited(TargetWordLower, UTF8LowerCase(Form), 2);
       if (Dist <= 2) and (Form <> TargetWordLower) then
         AddWeightedSuggestion(Suggestions, Form, Dist);
     end;
@@ -2666,16 +3162,25 @@ begin
   Result := D[Len1, Len2];
 end;
 
+// String wrapper: decodes both operands and calls the wide version
 function THunSpellChecker.LevenshteinDistanceLimited(const S1, S2: string; MaxDist: integer): integer;
+begin
+  Result := LevenshteinWideLimited(UTF8Decode(S1), UTF8Decode(S2), MaxDist);
+end;
+
+// Wide-string distance with the band-limit optimization. Callers that already
+// have decoded wide strings avoid the decode cost on every comparison
+function THunSpellChecker.LevenshteinWideLimited(const W1, W2: widestring; MaxDist: integer): integer;
 var
-  Wide1, Wide2: widestring;
   Len1, Len2, i, j, Prev, Cur, Tmp, Cost, RowMin: integer;
+  LocalW1: widestring;
+  LocalW2: widestring;
   PrevRow, CurRow: TIntegerArray;
 begin
-  Wide1 := UTF8Decode(S1);
-  Wide2 := UTF8Decode(S2);
-  Len1 := Length(Wide1);
-  Len2 := Length(Wide2);
+  LocalW1 := W1;
+  LocalW2 := W2;
+  Len1 := Length(LocalW1);
+  Len2 := Length(LocalW2);
   PrevRow := nil;
   CurRow := nil;
 
@@ -2686,8 +3191,8 @@ begin
     Tmp := Len1;
     Len1 := Len2;
     Len2 := Tmp;
-    Wide1 := UTF8Decode(S2);
-    Wide2 := UTF8Decode(S1);
+    LocalW1 := W2;
+    LocalW2 := W1;
   end;
 
   SetLength(PrevRow, Len2 + 1);
@@ -2700,7 +3205,7 @@ begin
     RowMin := CurRow[0];
     for j := 1 to Len2 do
     begin
-      if Wide1[i] = Wide2[j] then Cost := 0
+      if LocalW1[i] = LocalW2[j] then Cost := 0
       else
         Cost := 1;
       Prev := PrevRow[j] + 1;
@@ -2745,7 +3250,7 @@ begin
       if NewWord <> CleanWord then
         if HashFind(NewWord, FoundIndex) then
           if not IsNoSuggestWord(FWords[FoundIndex].Flags) and not IsForbiddenWord(FWords[FoundIndex].Flags) then
-            AddWeightedSuggestion(Weighted, NewWord, LevenshteinDistance(CleanWord, NewWord));
+            AddWeightedSuggestion(Weighted, NewWord, LevenshteinDistanceLimited(CleanWord, NewWord, 2));
     end;
   end;
 
@@ -2768,7 +3273,7 @@ begin
         NewWord := UTF8Copy(CleanWord, 1, CharIdx - 1) + Replacement + UTF8Copy(CleanWord, CharIdx + 1, MaxInt);
         if HashFind(NewWord, FoundIndex) then
           if not IsNoSuggestWord(FWords[FoundIndex].Flags) and not IsForbiddenWord(FWords[FoundIndex].Flags) then
-            AddWeightedSuggestion(Weighted, NewWord, LevenshteinDistance(CleanWord, NewWord));
+            AddWeightedSuggestion(Weighted, NewWord, LevenshteinDistanceLimited(CleanWord, NewWord, 2));
       end;
       Inc(CharIdx);
     end;
@@ -2800,7 +3305,7 @@ begin
             cand := UTF8Copy(CleanWord, 1, i - 1) + repl + UTF8Copy(CleanWord, i + 1, MaxInt);
             if HashFind(cand, FoundIndex) then
               if not IsNoSuggestWord(FWords[FoundIndex].Flags) and not IsForbiddenWord(FWords[FoundIndex].Flags) then
-                AddWeightedSuggestion(Weighted, cand, LevenshteinDistance(CleanWord, cand));
+                AddWeightedSuggestion(Weighted, cand, LevenshteinDistanceLimited(CleanWord, cand, 2));
           end;
         end;
       end;
@@ -2822,7 +3327,7 @@ begin
           cand := UTF8Copy(CleanWord, 1, i - 1) + Neighbor + UTF8Copy(CleanWord, i + 1, MaxInt);
           if HashFind(cand, FoundIndex) then
             if not IsNoSuggestWord(FWords[FoundIndex].Flags) and not IsForbiddenWord(FWords[FoundIndex].Flags) then
-              AddWeightedSuggestion(Weighted, cand, LevenshteinDistance(CleanWord, cand));
+              AddWeightedSuggestion(Weighted, cand, LevenshteinDistanceLimited(CleanWord, cand, 2));
         end;
         if pos < UTF8Length(Group) then
         begin
@@ -2830,7 +3335,7 @@ begin
           cand := UTF8Copy(CleanWord, 1, i - 1) + Neighbor + UTF8Copy(CleanWord, i + 1, MaxInt);
           if HashFind(cand, FoundIndex) then
             if not IsNoSuggestWord(FWords[FoundIndex].Flags) and not IsForbiddenWord(FWords[FoundIndex].Flags) then
-              AddWeightedSuggestion(Weighted, cand, LevenshteinDistance(CleanWord, cand));
+              AddWeightedSuggestion(Weighted, cand, LevenshteinDistanceLimited(CleanWord, cand, 2));
         end;
       end;
     end;
@@ -2846,7 +3351,7 @@ begin
         cand := UTF8Copy(CleanWord, 1, i) + repl + UTF8Copy(CleanWord, i + 1, MaxInt);
         if HashFind(cand, FoundIndex) then
           if not IsNoSuggestWord(FWords[FoundIndex].Flags) and not IsForbiddenWord(FWords[FoundIndex].Flags) then
-            AddWeightedSuggestion(Weighted, cand, LevenshteinDistance(CleanWord, cand));
+            AddWeightedSuggestion(Weighted, cand, LevenshteinDistanceLimited(CleanWord, cand, 2));
       end;
     end;
   end;
@@ -2856,7 +3361,7 @@ begin
     cand := UTF8Copy(CleanWord, 1, i - 1) + UTF8Copy(CleanWord, i + 1, MaxInt);
     if HashFind(cand, FoundIndex) then
       if not IsNoSuggestWord(FWords[FoundIndex].Flags) and not IsForbiddenWord(FWords[FoundIndex].Flags) then
-        AddWeightedSuggestion(Weighted, cand, LevenshteinDistance(CleanWord, cand));
+        AddWeightedSuggestion(Weighted, cand, LevenshteinDistanceLimited(CleanWord, cand, 2));
   end;
 
   for i := 1 to UTF8Length(CleanWord) - 1 do
@@ -2864,13 +3369,16 @@ begin
     cand := UTF8Copy(CleanWord, 1, i - 1) + UTF8Copy(CleanWord, i + 1, 1) + UTF8Copy(CleanWord, i, 1) + UTF8Copy(CleanWord, i + 2, MaxInt);
     if HashFind(cand, FoundIndex) then
       if not IsNoSuggestWord(FWords[FoundIndex].Flags) and not IsForbiddenWord(FWords[FoundIndex].Flags) then
-        AddWeightedSuggestion(Weighted, cand, LevenshteinDistance(CleanWord, cand));
+        AddWeightedSuggestion(Weighted, cand, LevenshteinDistanceLimited(CleanWord, cand, 2));
   end;
 end;
 
+// Scans the dictionary buckets and uses the pre-decoded wide lowercase forms
+// so LevenshteinWideLimited does not decode candidates again
 procedure THunSpellChecker.ProcessDictionaryScan(const CleanWord: string; var Weighted: TWeightedSuggestionArray);
 var
   TargetLower, TargetPrefix: string;
+  TargetLowerWide: widestring;
   TargetFirstCode: cardinal;
   TargetLen, MinLen, MaxLen, MinLenExt, MaxLenExt: integer;
   Len, BucketIdx, WordIndex, Dist: integer;
@@ -2881,6 +3389,7 @@ begin
   TargetLen := UTF8Length(TargetLower);
   if TargetLen = 0 then Exit;
   TargetFirstCode := FirstCodepoint(TargetLower);
+  TargetLowerWide := UTF8Decode(TargetLower);
 
   MinLen := Max(0, TargetLen - 2);
   MaxLen := TargetLen + 2;
@@ -2892,7 +3401,7 @@ begin
     begin
       WordIndex := FLengthBuckets[Len][BucketIdx];
       if (TargetFirstCode <> 0) and (FAllWordsFirstChar[WordIndex] <> TargetFirstCode) then Continue;
-      Dist := LevenshteinDistanceLimited(TargetLower, FAllWordsLower[WordIndex], 2);
+      Dist := LevenshteinWideLimited(TargetLowerWide, FAllWordsLowerWide[WordIndex], 2);
       if Dist > 2 then Continue;
       FoundFlags := FWords[WordIndex].Flags;
       if IsNoSuggestWord(FoundFlags) or IsForbiddenWord(FoundFlags) then Continue;
@@ -2921,7 +3430,7 @@ begin
       begin
         if FirstCodepoint(CandidateLower) <> TargetFirstCode then Continue;
       end;
-      Dist := LevenshteinDistanceLimited(TargetLower, CandidateLower, 4);
+      Dist := LevenshteinWideLimited(TargetLowerWide, FAllWordsLowerWide[WordIndex], 4);
       if Dist > 4 then Continue;
       GenerateAndAddAffixForms(Weighted, FAllWords[WordIndex], FoundFlags, TargetLower);
     end;
@@ -2960,10 +3469,12 @@ function THunSpellChecker.AdjustCase(const Source, S: string): string;
 var
   SourceLower, SourceUpper: string;
   SrcFirstUp: boolean;
+  FirstChar: string;
 begin
   SourceLower := UTF8LowerCase(Source);
   SourceUpper := UTF8UpperCase(Source);
-  SrcFirstUp := (Source <> '') and (UTF8Copy(Source, 1, 1) = UTF8UpperCase(UTF8Copy(Source, 1, 1)));
+  FirstChar := UTF8Copy(Source, 1, 1);
+  SrcFirstUp := (Source <> '') and (FirstChar = UTF8UpperCase(FirstChar));
 
   if Source = SourceLower then Result := UTF8LowerCase(S)
   else if Source = SourceUpper then Result := UTF8UpperCase(S)
@@ -3016,6 +3527,7 @@ begin
     for i := 0 to High(Weighted) do
     begin
       Adjusted := AdjustCase(word, Weighted[i].S);
+      Adjusted := ApplyOconv(Adjusted);
       if UniqueResults.IndexOf(Adjusted) = -1 then
       begin
         UniqueResults.Add(Adjusted);
@@ -3034,6 +3546,8 @@ begin
     if i > 0 then CachedValue := CachedValue + '|';
     CachedValue := CachedValue + Result[i];
   end;
+  // Guard against unbounded growth of the suggestion cache
+  if FSuggestCache.Count >= 20000 then FSuggestCache.Clear;
   if CachedValue <> '' then
     FSuggestCache.Add(CleanWord + '=' + CachedValue);
 end;
