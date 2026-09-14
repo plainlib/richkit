@@ -91,7 +91,7 @@ type
     procedure ClearWithUndo;
 
     // Apply memo settings and related visual properties.
-    procedure UpdateState;
+    procedure UpdateState(AIndentPixels: integer = 3);
   end;
 
 implementation
@@ -1083,10 +1083,10 @@ begin
   Self.SelLength := 0;
 end;
 
-procedure TRichMemoHelper.UpdateState;
+procedure TRichMemoHelper.UpdateState(AIndentPixels: integer = 3);
 begin
   if not Self.Visible then Exit;
-  Self.SetLeftIndent;
+  Self.SetLeftIndent(AIndentPixels);
   Self.ApplyBidiMode;
 end;
 
