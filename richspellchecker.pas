@@ -51,6 +51,7 @@ type
     FIsShowingOurMenu: boolean; // indicates the popup was opened by our ShowContextMenu
     FOriginalPopupOnPopup: TNotifyEvent; // saved original OnPopup handler
     FOriginalPopupOnClose: TNotifyEvent; // saved original OnClose handler
+    FMemoChangeOnReplace: boolean; // if True, do not block RichMemo.OnChange during replacement
     FTimer: TTimer; // delayed cleanup timer
     function GetErrorAtTextPos(ATextPos: integer): PSpellError;
     procedure ApplyUnderlineToError(AError: PSpellError);
@@ -78,6 +79,10 @@ type
     property SubMenu: boolean read FSubMenu write FSubMenu default False;
     property SubMenuCaption: string read FSubMenuCaption write FSubMenuCaption;
     property SubMenuIndex: integer read FSubMenuIndex write FSubMenuIndex default 0;
+    // When True, RichMemo.OnChange is left active during a replacement from the
+    // suggestions menu. When False (default), OnChange is temporarily cleared
+    // to avoid reentrant spell checking.
+    property MemoChangeOnReplace: boolean read FMemoChangeOnReplace write FMemoChangeOnReplace default False;
   end;
 
 implementation
@@ -173,6 +178,7 @@ begin
   FIsShowingOurMenu := False;
   FOriginalPopupOnPopup := nil;
   FOriginalPopupOnClose := nil;
+  FMemoChangeOnReplace := False;
 
   FTimer := TTimer.Create(nil);
   FTimer.Enabled := False;
@@ -687,7 +693,8 @@ var
   RelPos: integer;
   OldError: PSpellError;
   NewLength: integer;
-  OldOnChange: TNotifyEvent; // saved OnChange handler
+  OldOnChange: TNotifyEvent;
+  SuppressOnChange: boolean;
 begin
   if FCurrentError = nil then
     Exit;
@@ -700,9 +707,15 @@ begin
     Exit;
   end;
 
-  // Temporarily disable OnChange event to prevent reentrant spell checking
-  OldOnChange := FRichMemo.OnChange;
-  FRichMemo.OnChange := nil;
+  // Temporarily disable OnChange event to prevent reentrant spell checking,
+  // unless the caller asked to keep it active via MemoChangeOnReplace.
+  SuppressOnChange := not FMemoChangeOnReplace;
+  OldOnChange := nil;
+  if SuppressOnChange then
+  begin
+    OldOnChange := FRichMemo.OnChange;
+    FRichMemo.OnChange := nil;
+  end;
   try
 
     Item := Sender as TMenuItem;
@@ -736,8 +749,9 @@ begin
     if Assigned(FOnSpellCheckNeeded) then
       FOnSpellCheckNeeded(Self);
   finally
-    // Restore original OnChange handler
-    FRichMemo.OnChange := OldOnChange;
+    // Restore original OnChange handler only if we cleared it
+    if SuppressOnChange then
+      FRichMemo.OnChange := OldOnChange;
   end;
 end;
 
