@@ -147,6 +147,7 @@ type
     function ApplyIconv(const S: string): string;
     function MatchesCompoundRule(const word, Rule: string): boolean;
     function IsCompoundNumber(const word: string): boolean;
+    function IsNumericWord(const S: string): boolean;
     function IsNoSuggestWord(const Flags: TIntegerArray): boolean;
     function IsForbiddenWord(const Flags: TIntegerArray): boolean;
     function HasFlag(const Flags: TIntegerArray; const FlagId: integer): boolean;
@@ -2175,6 +2176,21 @@ begin
     if MatchesCompoundRule(word, FCompoundRules[i]) then Exit(True);
 end;
 
+function THunSpellChecker.IsNumericWord(const S: string): boolean;
+var
+  i: integer;
+  Ch: string;
+begin
+  Result := False;
+  if S = '' then Exit;
+  for i := 1 to UTF8Length(S) do
+  begin
+    Ch := UTF8Copy(S, i, 1);
+    if (Length(Ch) <> 1) or not CharInSet(Ch[1], ['0'..'9']) then Exit;
+  end;
+  Result := True;
+end;
+
 function THunSpellChecker.IsNoSuggestWord(const Flags: TIntegerArray): boolean;
 begin
   Result := (FNoSuggestFlag >= 0) and HasFlag(Flags, FNoSuggestFlag);
@@ -2344,6 +2360,8 @@ begin
   SetLength(EmptyFlags, 0);
   CleanWord := ApplyIconv(word);
   CleanWord := RemoveIgnoreChars(CleanWord, FIgnoreChars);
+  // A word made of digits only is always considered valid
+  if IsNumericWord(CleanWord) then Exit(True);
   if HashFind(CleanWord, idx) then
   begin
     Flags := FWords[idx].Flags;
@@ -2405,6 +2423,7 @@ function THunSpellChecker.IsWordChar(Ch: pchar; CharLen: integer): boolean;
 var
   CodePoint: cardinal = 0;
   i: integer = 0;
+  ChStr: string = '';
 begin
   if CharLen = 1 then CodePoint := Ord(Ch^)
   else if CharLen = 2 then CodePoint := ((Ord(Ch^) and $1F) shl 6) or (Ord((Ch + 1)^) and $3F)
@@ -2421,6 +2440,15 @@ begin
 
   for i := 0 to High(FWordCharsCodes) do
     if FWordCharsCodes[i] = CodePoint then Exit(True);
+
+  // Any character that has an ICONV mapping is also treated as part of a word
+  if Length(FIconvFrom) > 0 then
+  begin
+    SetLength(ChStr, CharLen);
+    Move(Ch^, ChStr[1], CharLen);
+    for i := 0 to High(FIconvFrom) do
+      if FIconvFrom[i] = ChStr then Exit(True);
+  end;
 
   Result := False;
 end;
