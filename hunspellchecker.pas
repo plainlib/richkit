@@ -11,7 +11,7 @@ unit HunSpellChecker;
 interface
 
 uses
-  Classes, SysUtils, Graphics, Math, StrUtils, Character, LazUTF8;
+  Classes, SysUtils, Graphics, Math, StrUtils, Character, LConvEncoding, LazUTF8;
 
 type
   TStringArray = array of string;
@@ -114,6 +114,7 @@ type
     FMAPGroups: array of string;
     FSuggestCache: TStringList;
     FFlagMode: string; // ASCII, UTF-8, long, num
+    FEncoding: string; // Source encoding from the SET directive
     FAFCount: integer;
     FAAliases: array of TIntegerArray;
     FBreakPatterns: TStringList;
@@ -376,6 +377,54 @@ begin
   else if ch = 4 then
     Result := ((Ord(p^) and $07) shl 18) or ((Ord((p + 1)^) and $3F) shl 12) or ((Ord((p + 2)^) and $3F) shl 6) or
       (Ord((p + 3)^) and $3F);
+end;
+
+function IsUTF8EncodingName(const Name: string): boolean;
+var
+  n: string;
+begin
+  n := UpperCase(Trim(Name));
+  n := StringReplace(n, '-', '', [rfReplaceAll]);
+  n := StringReplace(n, '_', '', [rfReplaceAll]);
+  Result := (n = '') or (n = 'UTF8');
+end;
+
+function HunEncodingToUTF8(const S, EncodingName: string): string;
+var
+  n: string;
+begin
+  Result := S;
+  n := UpperCase(Trim(EncodingName));
+  // Remove separators so the comparison is tolerant to iso-8859-7, ISO_8859-7, iso88597
+  n := StringReplace(n, '-', '', [rfReplaceAll]);
+  n := StringReplace(n, '_', '', [rfReplaceAll]);
+  n := StringReplace(n, ' ', '', [rfReplaceAll]);
+  if (n = '') or (n = 'UTF8') then Exit(S);
+
+  if n = 'ISO88591' then Exit(ISO_8859_1ToUTF8(S));
+  if n = 'ISO88592' then Exit(ISO_8859_2ToUTF8(S));
+  if n = 'ISO88593' then Exit(ISO_8859_3ToUTF8(S));
+  if n = 'ISO88594' then Exit(ISO_8859_4ToUTF8(S));
+  if n = 'ISO88595' then Exit(ISO_8859_5ToUTF8(S));
+  if n = 'ISO88597' then Exit(ISO_8859_7ToUTF8(S));
+  if n = 'ISO88599' then Exit(ISO_8859_9ToUTF8(S));
+  if n = 'ISO885910' then Exit(ISO_8859_10ToUTF8(S));
+  if n = 'ISO885913' then Exit(ISO_8859_13ToUTF8(S));
+  if n = 'ISO885914' then Exit(ISO_8859_14ToUTF8(S));
+  if n = 'ISO885915' then Exit(ISO_8859_15ToUTF8(S));
+  if n = 'ISO885916' then Exit(ISO_8859_16ToUTF8(S));
+  if n = 'KOI8R' then Exit(KOI8RToUTF8(S));
+  if n = 'CP1250' then Exit(CP1250ToUTF8(S));
+  if n = 'CP1251' then Exit(CP1251ToUTF8(S));
+  if n = 'CP1252' then Exit(CP1252ToUTF8(S));
+  if n = 'CP1253' then Exit(CP1253ToUTF8(S));
+  if n = 'CP1254' then Exit(CP1254ToUTF8(S));
+  if n = 'CP1255' then Exit(CP1255ToUTF8(S));
+  if n = 'CP1256' then Exit(CP1256ToUTF8(S));
+  if n = 'CP1257' then Exit(CP1257ToUTF8(S));
+  if n = 'CP1258' then Exit(CP1258ToUTF8(S));
+  // ISO-8859-6, ISO-8859-8, ISO-8859-11 and KOI8-U have no dedicated helper in LConvEncoding
+  // and are not required for the currently supported dictionaries. The string is returned as is.
 end;
 
 function THunSpellChecker.StripComment(const S: string): string;
@@ -665,6 +714,7 @@ begin
   SetLength(FCrossSuffixFlags, 0);
   SetLength(FCrossPrefixFlags, 0);
   FFlagMode := 'ASCII';
+  FEncoding := 'UTF-8';
 
   SetLength(FAllWords, 0);
   SetLength(FAllWordsLower, 0);
@@ -769,6 +819,7 @@ begin
     FKeyGroups.Clear;
     FSuggestCache.Clear;
     FFlagMode := 'ASCII';
+    FEncoding := 'UTF-8';
     FNoSuggestFlag := -1;
     FNeedAffixFlag := -1;
     FPseudoRootFlag := -1;
@@ -891,6 +942,22 @@ begin
   Parts := TStringList.Create;
   try
     Lines.LoadFromStream(Stream);
+
+    // Detect encoding from the SET directive and convert lines to UTF-8 if needed
+    FEncoding := 'UTF-8';
+    for i := 0 to Min(200, Lines.Count - 1) do
+    begin
+      Line := Trim(Lines[i]);
+      if (Length(Line) >= 4) and (Copy(Line, 1, 4) = 'SET ') then
+      begin
+        FEncoding := Trim(Copy(Line, 5, MaxInt));
+        Break;
+      end;
+    end;
+    if not IsUTF8EncodingName(FEncoding) then
+      for i := 0 to Lines.Count - 1 do
+        Lines[i] := HunEncodingToUTF8(Lines[i], FEncoding);
+
     while LineIdx < Lines.Count do
     begin
       Line := StripComment(Lines[LineIdx]);
@@ -1231,6 +1298,11 @@ begin
   FlagList := TStringList.Create;
   try
     Lines.LoadFromStream(Stream);
+
+    // Convert lines from the source encoding (detected in the AFF file) to UTF-8
+    if not IsUTF8EncodingName(FEncoding) then
+      for i := 0 to Lines.Count - 1 do
+        Lines[i] := HunEncodingToUTF8(Lines[i], FEncoding);
 
     // The first line of the DIC contains the number of words.
     // We use it to preallocate FWords in one shot, eliminating the doubling copies.
