@@ -85,6 +85,18 @@ type
     property MemoChangeOnReplace: boolean read FMemoChangeOnReplace write FMemoChangeOnReplace default False;
   end;
 
+// Batch-draws the given errors on ARichMemo. Existing underlines are not
+// cleared here - callers decide whether a clear is needed first. Used both
+// by TRichSpellChecker.ApplyUnderlines (list of pointers) and by the
+// standalone DrawSpellErrors (array of records).
+procedure DrawSpellErrorsBatch(ARichMemo: TRichMemo; AErrors: TList);
+// Standalone helpers that draw or clear spell-check underlines on any RichMemo
+// without creating a TRichSpellChecker instance. Handy when the same text is
+// shown in more than one control and all of them need the same underlines.
+procedure ClearSpellErrors(ARichMemo: TRichMemo);
+procedure DrawSpellUnderline(ARichMemo: TRichMemo; AOffset, ALength: integer; AColor: TColor);
+procedure DrawSpellErrors(ARichMemo: TRichMemo; const AErrors: TSpellErrorArray);
+
 implementation
 
 {$IFDEF WINDOWS}
@@ -159,6 +171,227 @@ type
     end;
   end;
 {$ENDIF}
+
+{%Region -fold Standalone methods}
+
+procedure DrawSpellErrorsBatch(ARichMemo: TRichMemo; AErrors: TList);
+var
+  i: integer;
+  {$IFDEF WINDOWS}
+  scrollPos: TPoint;
+  {$ENDIF}
+  OldSelStart, OldSelLength: integer;
+begin
+  if not Assigned(ARichMemo) then
+    Exit;
+
+  // Save caret position
+  OldSelStart := ARichMemo.SelStart;
+  OldSelLength := ARichMemo.SelLength;
+
+  {$IFDEF WINDOWS}
+  // Save scroll position
+  {$HINTS OFF}
+  SendMessage(ARichMemo.Handle, EM_GETSCROLLPOS, 0, LPARAM(PtrInt(@scrollPos)));
+  {$HINTS ON}
+
+  // Suspend Undo for the entire batch of formatting
+  ARichMemo.SuspendUndo;
+  try
+    // Block repainting while applying all underlines
+    SendMessage(ARichMemo.Handle, WM_SETREDRAW, 0, 0);
+    try
+      for i := 0 to AErrors.Count - 1 do
+      begin
+        DrawSpellUnderline(ARichMemo,
+          PSpellError(AErrors[i])^.Offset,
+          PSpellError(AErrors[i])^.Length,
+          PSpellError(AErrors[i])^.Color);
+      end;
+    finally
+      // Restore caret position
+      ARichMemo.SelStart := OldSelStart;
+      ARichMemo.SelLength := OldSelLength;
+      // Restore scroll position
+      {$HINTS OFF}
+      SendMessage(ARichMemo.Handle, EM_SETSCROLLPOS, 0, LPARAM(PtrInt(@scrollPos)));
+      {$HINTS ON}
+      SendMessage(ARichMemo.Handle, WM_SETREDRAW, 1, 0);
+      ARichMemo.Invalidate;
+    end;
+  finally
+    ARichMemo.ResumeUndo;
+  end;
+  {$ELSE}
+  for i := 0 to AErrors.Count - 1 do
+  begin
+    DrawSpellUnderline(ARichMemo,
+      PSpellError(AErrors[i])^.Offset,
+      PSpellError(AErrors[i])^.Length,
+      PSpellError(AErrors[i])^.Color);
+    ARichMemo.SelStart := OldSelStart;
+    ARichMemo.SelLength := OldSelLength;
+  end;
+
+  ARichMemo.SelStart := OldSelStart;
+  ARichMemo.SelLength := OldSelLength;
+  {$ENDIF}
+end;
+
+procedure DrawSpellUnderline(ARichMemo: TRichMemo; AOffset, ALength: integer; AColor: TColor);
+{$IFDEF WINDOWS}
+var
+  cf: CHARFORMAT2W;
+  cr: CHARRANGE;
+{$ENDIF}
+begin
+  {$IFDEF WINDOWS}
+  if not Assigned(ARichMemo) then
+    Exit;
+
+  ARichMemo.SuspendUndo;
+  try
+    cr.cpMin := AOffset;
+    cr.cpMax := AOffset + ALength;
+    {$HINTS OFF}
+    SendMessage(ARichMemo.Handle, EM_EXSETSEL, 0, LPARAM(PtrInt(@cr)));
+    {$HINTS ON}
+
+    cf := Default(CHARFORMAT2W);
+    cf.cbSize := SizeOf(cf);
+    cf.dwMask := CFM_UNDERLINE or CFM_UNDERLINETYPE or CFM_UNDERLINECOLOR or CFM_COLOR;
+    cf.dwEffects := CFE_UNDERLINE;
+    cf.bUnderlineType := CFU_UNDERLINEWAVE;
+    cf.bUnderlineColor := MapColorToWinUnderline(AColor);
+    cf.crTextColor := GetSysColor(COLOR_WINDOWTEXT);
+
+    {$HINTS OFF}
+    SendMessage(ARichMemo.Handle, EM_SETCHARFORMAT, SCF_SELECTION, LPARAM(PtrInt(@cf)));
+    {$HINTS ON}
+
+    ARichMemo.SelLength := 0;
+  finally
+    ARichMemo.ResumeUndo;
+  end;
+  {$ELSE}
+  if not Assigned(ARichMemo) then
+    Exit;
+
+  ARichMemo.SetRangeParams(
+    AOffset,
+    ALength,
+    [tmm_Styles, tmm_Color],
+    '',
+    0,
+    AColor,
+    [fsUnderline],
+    []
+    );
+  {$ENDIF}
+end;
+
+procedure DrawSpellErrors(ARichMemo: TRichMemo; const AErrors: TSpellErrorArray);
+var
+  TempList: TList;
+  i: integer;
+begin
+  if not Assigned(ARichMemo) then
+    Exit;
+
+  // Drop stale underlines first, then draw fresh ones
+  ClearSpellErrors(ARichMemo);
+
+  if Length(AErrors) = 0 then
+    Exit;
+
+  // Wrap the array into a temporary pointer list so we can reuse the shared
+  // batch routine. Taking address of elements of a dynamic array is safe
+  // here because AErrors lives in the caller for the whole call.
+  TempList := TList.Create;
+  try
+    for i := 0 to High(AErrors) do
+      TempList.Add(@AErrors[i]);
+    DrawSpellErrorsBatch(ARichMemo, TempList);
+  finally
+    TempList.Free;
+  end;
+end;
+
+procedure ClearSpellErrors(ARichMemo: TRichMemo);
+{$IFDEF WINDOWS}
+var
+  OldSelStart, OldSelLength: integer;
+  cf: CHARFORMAT2W;
+  cr: CHARRANGE;
+  scrollPos: TPoint;
+{$ENDIF}
+begin
+  {$IFDEF WINDOWS}
+  if not Assigned(ARichMemo) then
+    Exit;
+
+  // Save caret and scroll positions
+  OldSelStart := ARichMemo.SelStart;
+  OldSelLength := ARichMemo.SelLength;
+  {$HINTS OFF}
+  SendMessage(ARichMemo.Handle, EM_GETSCROLLPOS, 0, LPARAM(PtrInt(@scrollPos)));
+  {$HINTS ON}
+
+  ARichMemo.SuspendUndo;
+  try
+    SendMessage(ARichMemo.Handle, WM_SETREDRAW, 0, 0);
+    try
+      cr.cpMin := 0;
+      cr.cpMax := Length(ARichMemo.Text);
+      {$HINTS OFF}
+      SendMessage(ARichMemo.Handle, EM_EXSETSEL, 0, LPARAM(PtrInt(@cr)));
+      {$HINTS ON}
+
+      cf := Default(CHARFORMAT2W);
+      cf.cbSize := SizeOf(cf);
+      cf.dwMask := CFM_UNDERLINE or CFM_UNDERLINETYPE or CFM_UNDERLINECOLOR or CFM_COLOR;
+      cf.dwEffects := 0;
+      cf.bUnderlineType := CFU_UNDERLINENONE;
+      cf.bUnderlineColor := 0;
+      cf.crTextColor := GetSysColor(COLOR_WINDOWTEXT);
+
+      {$HINTS OFF}
+      SendMessage(ARichMemo.Handle, EM_SETCHARFORMAT, SCF_SELECTION, LPARAM(PtrInt(@cf)));
+      {$HINTS ON}
+    finally
+      ARichMemo.SelStart := OldSelStart;
+      ARichMemo.SelLength := OldSelLength;
+      {$HINTS OFF}
+      SendMessage(ARichMemo.Handle, EM_SETSCROLLPOS, 0, LPARAM(PtrInt(@scrollPos)));
+      {$HINTS ON}
+      SendMessage(ARichMemo.Handle, WM_SETREDRAW, 1, 0);
+      ARichMemo.Invalidate;
+    end;
+  finally
+    ARichMemo.ResumeUndo;
+  end;
+  {$ELSE}
+  if not Assigned(ARichMemo) then
+    Exit;
+  if Length(ARichMemo.Text) = 0 then
+    Exit;
+
+  ARichMemo.SetRangeParams(
+    0,
+    Length(ARichMemo.Text),
+    [tmm_Styles, tmm_Color],
+    '',
+    0,
+    clWindowText,
+    [],
+    [fsUnderline]
+    );
+  {$ENDIF}
+end;
+
+{%EndRegion}
+
+{%Region -fold TRichSpellChecker}
 
 constructor TRichSpellChecker.Create(ARichMemo: TRichMemo);
 begin
@@ -245,81 +478,8 @@ begin
 end;
 
 procedure TRichSpellChecker.ClearUnderlines;
-{$IFDEF WINDOWS}
-var
-  OldSelStart, OldSelLength: integer;
-  cf: CHARFORMAT2W;
-  cr: CHARRANGE;
-  scrollPos: TPoint;
-{$ENDIF}
 begin
-  {$IFDEF WINDOWS}
-  if not Assigned(FRichMemo) then
-    Exit;
-
-  // Save caret position
-  OldSelStart := FRichMemo.SelStart;
-  OldSelLength := FRichMemo.SelLength;
-
-  // Save scroll position
-  {$HINTS OFF}
-  SendMessage(FRichMemo.Handle, EM_GETSCROLLPOS, 0, LPARAM(PtrInt(@scrollPos)));
-  {$HINTS ON}
-
-  // Suspend Undo so this formatting change does not appear in history
-  FRichMemo.SuspendUndo;
-  try
-    // Block repainting
-    SendMessage(FRichMemo.Handle, WM_SETREDRAW, 0, 0);
-    try
-      cr.cpMin := 0;
-      cr.cpMax := Length(FRichMemo.Text);
-      {$HINTS OFF}
-      SendMessage(FRichMemo.Handle, EM_EXSETSEL, 0, LPARAM(PtrInt(@cr)));
-      {$HINTS ON}
-
-      cf := Default(CHARFORMAT2W);
-      cf.cbSize := SizeOf(cf);
-      cf.dwMask := CFM_UNDERLINE or CFM_UNDERLINETYPE or CFM_UNDERLINECOLOR or CFM_COLOR;
-      cf.dwEffects := 0;
-      cf.bUnderlineType := CFU_UNDERLINENONE;
-      cf.bUnderlineColor := 0;
-      cf.crTextColor := GetSysColor(COLOR_WINDOWTEXT);
-
-      {$HINTS OFF}
-      SendMessage(FRichMemo.Handle, EM_SETCHARFORMAT, SCF_SELECTION, LPARAM(PtrInt(@cf)));
-      {$HINTS ON}
-    finally
-      // Restore caret position
-      FRichMemo.SelStart := OldSelStart;
-      FRichMemo.SelLength := OldSelLength;
-      // Restore scroll position
-      {$HINTS OFF}
-      SendMessage(FRichMemo.Handle, EM_SETSCROLLPOS, 0, LPARAM(PtrInt(@scrollPos)));
-      {$HINTS ON}
-      SendMessage(FRichMemo.Handle, WM_SETREDRAW, 1, 0);
-      FRichMemo.Invalidate;
-    end;
-  finally
-    FRichMemo.ResumeUndo;
-  end;
-  {$ELSE}
-  if not Assigned(FRichMemo) then
-    Exit;
-  if Length(FRichMemo.Text) = 0 then
-    Exit;
-
-  FRichMemo.SetRangeParams(
-    0,
-    Length(FRichMemo.Text),
-    [tmm_Styles, tmm_Color],
-    '',
-    0,
-    clWindowText,
-    [],
-    [fsUnderline]
-    );
-  {$ENDIF}
+  ClearSpellErrors(FRichMemo);
 end;
 
 procedure TRichSpellChecker.AddError(AOffset, ALength: integer; const AMessage: string; const AReplacements: array of string;
@@ -344,122 +504,15 @@ begin
 end;
 
 procedure TRichSpellChecker.ApplyUnderlineToError(AError: PSpellError);
-{$IFDEF WINDOWS}
-var
-  cf: CHARFORMAT2W;
-  cr: CHARRANGE;
-{$ENDIF}
 begin
-  {$IFDEF WINDOWS}
-  if not Assigned(FRichMemo) or (AError = nil) then
+  if AError = nil then
     Exit;
-
-  // Suspend Undo for this formatting operation
-  FRichMemo.SuspendUndo;
-  try
-    cr.cpMin := AError^.Offset;
-    cr.cpMax := AError^.Offset + AError^.Length;
-    {$HINTS OFF}
-    SendMessage(FRichMemo.Handle, EM_EXSETSEL, 0, LPARAM(PtrInt(@cr)));
-    {$HINTS ON}
-
-    cf := Default(CHARFORMAT2W);
-    cf.cbSize := SizeOf(cf);
-    cf.dwMask := CFM_UNDERLINE or CFM_UNDERLINETYPE or CFM_UNDERLINECOLOR or CFM_COLOR;
-    cf.dwEffects := CFE_UNDERLINE;
-    cf.bUnderlineType := CFU_UNDERLINEWAVE;
-    cf.bUnderlineColor := MapColorToWinUnderline(AError^.Color);
-    cf.crTextColor := GetSysColor(COLOR_WINDOWTEXT);
-
-    {$HINTS OFF}
-    SendMessage(FRichMemo.Handle, EM_SETCHARFORMAT, SCF_SELECTION, LPARAM(PtrInt(@cf)));
-    {$HINTS ON}
-
-    FRichMemo.SelLength := 0;
-  finally
-    FRichMemo.ResumeUndo;
-  end;
-  {$ELSE}
-  if not Assigned(FRichMemo) or (AError = nil) then
-    Exit;
-
-  FRichMemo.SetRangeParams(
-    AError^.Offset,
-    AError^.Length,
-    [tmm_Styles, tmm_Color],
-    '',
-    0,
-    AError^.Color,
-    [fsUnderline],
-    []
-    );
-  {$ENDIF}
+  DrawSpellUnderline(FRichMemo, AError^.Offset, AError^.Length, AError^.Color);
 end;
 
 procedure TRichSpellChecker.ApplyUnderlines;
-{$IFDEF WINDOWS}
-var
-  i: integer;
-  scrollPos: TPoint;
-  OldSelStart, OldSelLength: integer;
-{$ELSE}
-var
-  i: integer;
-  OldSelStart, OldSelLength: integer;
-{$ENDIF}
 begin
-  {$IFDEF WINDOWS}
-  if not Assigned(FRichMemo) then
-    Exit;
-
-  // Save caret position
-  OldSelStart := FRichMemo.SelStart;
-  OldSelLength := FRichMemo.SelLength;
-
-  // Save scroll position
-  {$HINTS OFF}
-  SendMessage(FRichMemo.Handle, EM_GETSCROLLPOS, 0, LPARAM(PtrInt(@scrollPos)));
-  {$HINTS ON}
-
-  // Suspend Undo for the entire batch of formatting
-  FRichMemo.SuspendUndo;
-  try
-    // Block repainting while applying all underlines
-    SendMessage(FRichMemo.Handle, WM_SETREDRAW, 0, 0);
-    try
-      for i := 0 to FErrors.Count - 1 do
-        ApplyUnderlineToError(PSpellError(FErrors[i]));
-    finally
-      // Restore caret position
-      FRichMemo.SelStart := OldSelStart;
-      FRichMemo.SelLength := OldSelLength;
-      // Restore scroll position
-      {$HINTS OFF}
-      SendMessage(FRichMemo.Handle, EM_SETSCROLLPOS, 0, LPARAM(PtrInt(@scrollPos)));
-      {$HINTS ON}
-      SendMessage(FRichMemo.Handle, WM_SETREDRAW, 1, 0);
-      FRichMemo.Invalidate;
-    end;
-  finally
-    FRichMemo.ResumeUndo;
-  end;
-  {$ELSE}
-  if not Assigned(FRichMemo) then
-    Exit;
-
-  OldSelStart := FRichMemo.SelStart;
-  OldSelLength := FRichMemo.SelLength;
-
-  for i := 0 to FErrors.Count - 1 do
-  begin
-    ApplyUnderlineToError(PSpellError(FErrors[i]));
-    FRichMemo.SelStart := OldSelStart;
-    FRichMemo.SelLength := OldSelLength;
-  end;
-
-  FRichMemo.SelStart := OldSelStart;
-  FRichMemo.SelLength := OldSelLength;
-  {$ENDIF}
+  DrawSpellErrorsBatch(FRichMemo, FErrors);
 end;
 
 function TRichSpellChecker.GetErrorAtTextPos(ATextPos: integer): PSpellError;
@@ -833,5 +886,7 @@ begin
   Dispose(AError);
   {$ENDIF}
 end;
+
+{%EndRegion}
 
 end.
