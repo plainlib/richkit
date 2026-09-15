@@ -650,9 +650,16 @@ var
   Flags: cardinal;
   LogicalWidth: integer; // Logical width for DrawText
 begin
-
   if AText = '' then
     Exit(0);
+
+  // RichEdit stores soft line breaks (Shift+Enter) as vertical tabs (#11),
+  // but DrawText only treats CR, LF and CRLF as line breaks. Normalize
+  // every representation to sLineBreak before measuring, otherwise the
+  // whole text is seen as a single line
+  AText := StringReplace(AText, #13#10, #10, [rfReplaceAll]);
+  AText := StringReplace(AText, #11, #10, [rfReplaceAll]);
+  AText := StringReplace(AText, #10, sLineBreak, [rfReplaceAll]);
 
   // Always add LineEnding
   AText := AText + LineEnding + ' ';
