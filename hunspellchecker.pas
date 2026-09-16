@@ -2377,7 +2377,7 @@ begin
     if not MatchesCondition(FSR.Condition, FSR.WideCondition, Prev, False) then Continue;
     // The stem must carry the rule's own flag
     if TryDerive(Prev, Depth + 1, AllowOnlyInCompound, FSR.FlagId, PrevFlags) then
-      if (RequiredFlag < 0) or HasFlag(FSR.Continuation, RequiredFlag) then
+      if (RequiredFlag < 0) or HasFlag(FSR.Continuation, RequiredFlag) or HasFlag(PrevFlags, RequiredFlag) then
       begin
         SetLength(OutFlags, Length(FSR.Continuation));
         for k := 0 to High(FSR.Continuation) do
@@ -2411,7 +2411,7 @@ begin
     if FPR.Strip <> '' then Prev := FPR.Strip + Prev;
     if not MatchesCondition(FPR.Condition, FPR.WideCondition, Prev, True) then Continue;
     if TryDerive(Prev, Depth + 1, AllowOnlyInCompound, FPR.FlagId, PrevFlags) then
-      if (RequiredFlag < 0) or HasFlag(FPR.Continuation, RequiredFlag) then
+      if (RequiredFlag < 0) or HasFlag(FPR.Continuation, RequiredFlag) or HasFlag(PrevFlags, RequiredFlag) then
       begin
         SetLength(OutFlags, Length(FPR.Continuation));
         for k := 0 to High(FPR.Continuation) do
