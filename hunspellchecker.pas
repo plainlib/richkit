@@ -1684,6 +1684,7 @@ var
   i: integer = 0;
   ExpectedWords: integer = 0;
   AliasNum: integer = 0;
+  TabPos: integer = 0;
 begin
   Lines := TStringList.Create;
   try
@@ -1717,6 +1718,11 @@ begin
       Inc(LineIdx);
       if Line = '' then Continue;
       if (Length(Line) > 0) and (Line[1] = '#') then Continue;
+
+      // Strip morphological data after a tab, format is word[/flags][TAB morph]
+      TabPos := Pos(#9, Line);
+      if TabPos > 0 then
+        Line := Copy(Line, 1, TabPos - 1);
 
       SlashPos := Pos('/', Line);
       if SlashPos > 0 then
