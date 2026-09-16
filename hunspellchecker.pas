@@ -2932,6 +2932,7 @@ var
   CodePoint: cardinal = 0;
   i: integer = 0;
   ChStr: string = '';
+  Cat: TUnicodeCategory = TUnicodeCategory.ucUppercaseLetter;
 begin
   if CharLen = 1 then CodePoint := Ord(Ch^)
   else if CharLen = 2 then CodePoint := ((Ord(Ch^) and $1F) shl 6) or (Ord((Ch + 1)^) and $3F)
@@ -2943,7 +2944,15 @@ begin
 
   {$NOTES OFF}
   if CodePoint <= $FFFF then
+  begin
     if TCharacter.IsLetterOrDigit(widechar(CodePoint)) then Exit(True);
+    // Combining marks such as Devanagari matras, virama, anusvara and
+    // visarga must stay inside a word, otherwise the tokenizer splits
+    // words like पहचान into पहच + ा + न
+    Cat := TCharacter.GetUnicodeCategory(widechar(CodePoint));
+    if (Cat = TUnicodeCategory.ucNonSpacingMark) or (Cat = TUnicodeCategory.ucCombiningMark) or
+      (Cat = TUnicodeCategory.ucEnclosingMark) then Exit(True);
+  end;
   {$NOTES ON}
 
   for i := 0 to High(FWordCharsCodes) do
