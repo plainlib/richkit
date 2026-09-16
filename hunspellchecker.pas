@@ -163,6 +163,7 @@ type
     FCompoundForbidFlag: integer;
     FCompoundRecurse: integer;      // Guard against infinite recursion in nested compound validation
     FIncludeSuggestions: boolean;   // When False, CheckText skips Suggest for speed
+    FCancelFlag: PInteger;          // Optional pointer to an external cancellation flag
     FCompoundMin: integer;
     FCompoundWordMax: integer;
     FCompoundRules: array of string;
@@ -240,14 +241,26 @@ type
     procedure SortWeightedSuggestions(var Arr: TWeightedSuggestionArray);
     function AdjustCase(const Source, S: string): string;
   public
+    // Creates a new checker instance with empty word and affix tables
     constructor Create;
+    // Frees all internal tables, caches and affix rules
     destructor Destroy; override;
+    // Loads affix and dictionary data from the given streams
     function LoadFromStream(AFFStream, DICStream: TStream): boolean;
+    // Loads affix and dictionary data from the given files
     function LoadFromFiles(const AFFFileName, DICFileName: string): boolean;
+    // Returns True when the given single word is spelled correctly
     function CheckWord(const word: string): boolean;
+    // Scans the whole text and returns an array of spelling errors
     function CheckText(const Text: string): TSpellErrorArray;
+    // Returns up to ten replacement candidates for the given misspelled word
     function Suggest(const word: string): TStringArray;
+    // When False, CheckText skips suggestion generation for speed
     property IncludeSuggestions: boolean read FIncludeSuggestions write FIncludeSuggestions;
+    // Optional pointer to an external integer flag. When it is not nil and its
+    // value is non-zero, long running checks and suggestion scans abort as soon
+    // as possible. The caller is responsible for the lifetime of the pointed value.
+    property CancelFlag: PInteger read FCancelFlag write FCancelFlag;
   end;
 
 function HunspellDictionaryCandidates(const Lang: string): TStringArray;
@@ -934,6 +947,7 @@ begin
   FCompoundMin := 0;
   FCompoundRecurse := 0;
   FIncludeSuggestions := True;
+  FCancelFlag := nil;
   FCompoundWordMax := 0;
   FAFCount := 0;
   SetLength(FAAliases, 0);
@@ -2962,6 +2976,12 @@ begin
   WordLengthChars := 0;
   while Ptr^ <> #0 do
   begin
+    // Abort quickly if an external cancellation was requested
+    if (FCancelFlag <> nil) and (FCancelFlag^ <> 0) then
+    begin
+      SetLength(Result, 0);
+      Exit;
+    end;
     {$NOTES OFF}
     CharLen := UTF8CodepointSize(Ptr);
     {$NOTES ON}
@@ -3293,6 +3313,7 @@ begin
   begin
     for i := 1 to UTF8Length(CleanWord) do
     begin
+      if (FCancelFlag <> nil) and (FCancelFlag^ <> 0) then Exit;
       ch := UTF8Copy(CleanWord, i, 1);
       pos := UTF8Pos(ch, FTryChars);
       if pos > 0 then
@@ -3314,6 +3335,7 @@ begin
 
   for i := 1 to UTF8Length(CleanWord) do
   begin
+    if (FCancelFlag <> nil) and (FCancelFlag^ <> 0) then Exit;
     ch := UTF8Copy(CleanWord, i, 1);
     for k := 0 to FKeyGroups.Count - 1 do
     begin
@@ -3358,6 +3380,7 @@ begin
 
   for i := 1 to UTF8Length(CleanWord) do
   begin
+    if (FCancelFlag <> nil) and (FCancelFlag^ <> 0) then Exit;
     cand := UTF8Copy(CleanWord, 1, i - 1) + UTF8Copy(CleanWord, i + 1, MaxInt);
     if HashFind(cand, FoundIndex) then
       if not IsNoSuggestWord(FWords[FoundIndex].Flags) and not IsForbiddenWord(FWords[FoundIndex].Flags) then
@@ -3397,6 +3420,7 @@ begin
 
   for Len := MinLen to MaxLen do
   begin
+    if (FCancelFlag <> nil) and (FCancelFlag^ <> 0) then Exit;
     for BucketIdx := 0 to High(FLengthBuckets[Len]) do
     begin
       WordIndex := FLengthBuckets[Len][BucketIdx];
@@ -3415,6 +3439,7 @@ begin
 
   for Len := MinLenExt to MaxLenExt do
   begin
+    if (FCancelFlag <> nil) and (FCancelFlag^ <> 0) then Exit;
     for BucketIdx := 0 to High(FLengthBuckets[Len]) do
     begin
       WordIndex := FLengthBuckets[Len][BucketIdx];
@@ -3515,8 +3540,11 @@ begin
 
   SetLength(Weighted, 0);
   ProcessREPandMAP(CleanWord, Weighted);
+  if (FCancelFlag <> nil) and (FCancelFlag^ <> 0) then Exit;
   GenerateTryKeyCandidates(CleanWord, Weighted);
+  if (FCancelFlag <> nil) and (FCancelFlag^ <> 0) then Exit;
   ProcessDictionaryScan(CleanWord, Weighted);
+  if (FCancelFlag <> nil) and (FCancelFlag^ <> 0) then Exit;
   SortWeightedSuggestions(Weighted);
 
   UniqueResults := TStringList.Create;
