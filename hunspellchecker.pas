@@ -2355,6 +2355,7 @@ begin
   LastByte := Ord(W[Length(W)]);
   for r := 0 to High(FSuffixByLastByte[LastByte]) do
   begin
+    if (FCancelFlag <> nil) and (FCancelFlag^ <> 0) then Exit;
     FlatIdx := FSuffixByLastByte[LastByte][r];
     FSR := FSuffixFlat[FlatIdx];
 
@@ -2390,6 +2391,7 @@ begin
   FirstByte := Ord(W[1]);
   for r := 0 to High(FPrefixByFirstByte[FirstByte]) do
   begin
+    if (FCancelFlag <> nil) and (FCancelFlag^ <> 0) then Exit;
     FlatIdx := FPrefixByFirstByte[FirstByte][r];
     FPR := FPrefixFlat[FlatIdx];
 
@@ -2695,6 +2697,7 @@ begin
 
   for i := minPart to lenWord - minPart do
   begin
+    if (FCancelFlag <> nil) and (FCancelFlag^ <> 0) then Exit;
     leftPart := UTF8Copy(word, 1, i);
     rightPart := UTF8Copy(word, i + 1, MaxInt);
 
@@ -2761,6 +2764,7 @@ begin
   Result := False;
   for i := 0 to FBreakPatterns.Count - 1 do
   begin
+    if (FCancelFlag <> nil) and (FCancelFlag^ <> 0) then Exit;
     pattern := FBreakPatterns[i];
     searchStr := pattern;
     if (Length(searchStr) > 0) and (searchStr[1] = '^') then Delete(searchStr, 1, 1);
@@ -3128,6 +3132,7 @@ begin
   // Suffix forms. Iterate over the word's own flags only.
   for i := 0 to High(Flags) do
   begin
+    if (FCancelFlag <> nil) and (FCancelFlag^ <> 0) then Exit;
     FlagId := Flags[i];
     idx := -1;
     if (FlagId >= 0) and (FlagId < Length(FSuffixFlagToIdx)) then
@@ -3152,6 +3157,7 @@ begin
   // Prefix forms
   for i := 0 to High(Flags) do
   begin
+    if (FCancelFlag <> nil) and (FCancelFlag^ <> 0) then Exit;
     FlagId := Flags[i];
     idx := -1;
     if (FlagId >= 0) and (FlagId < Length(FPrefixFlagToIdx)) then
@@ -3277,6 +3283,7 @@ var
 begin
   for RepIdx := 0 to High(FREPFrom) do
   begin
+    if (FCancelFlag <> nil) and (FCancelFlag^ <> 0) then Exit;
     RepFrom := FREPFrom[RepIdx];
     RepTo := FREPTo[RepIdx];
     REPResults := ApplyREP(CleanWord, RepFrom, RepTo);
@@ -3292,6 +3299,7 @@ begin
 
   for MapIdx := 0 to High(FMAPGroups) do
   begin
+    if (FCancelFlag <> nil) and (FCancelFlag^ <> 0) then Exit;
     Group := FMAPGroups[MapIdx];
     CharIdx := 1;
     while CharIdx <= UTF8Length(CleanWord) do
