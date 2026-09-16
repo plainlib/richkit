@@ -240,6 +240,7 @@ type
     function CompareWeighted(const A, B: TWeightedSuggestion): integer;
     procedure SortWeightedSuggestions(var Arr: TWeightedSuggestionArray);
     function AdjustCase(const Source, S: string): string;
+    function ParseContinuationFlags(const S: string): TIntegerArray;
   public
     // Creates a new checker instance with empty word and affix tables
     constructor Create;
@@ -1418,7 +1419,7 @@ begin
               SlashAdd := Pos('/', Add);
               if SlashAdd > 0 then
               begin
-                Continuation := ParseFlagString(Copy(Add, SlashAdd + 1, MaxInt));
+                Continuation := ParseContinuationFlags(Copy(Add, SlashAdd + 1, MaxInt));
                 Add := Copy(Add, 1, SlashAdd - 1);
               end;
               if Add = '0' then Add := '';
@@ -1459,7 +1460,7 @@ begin
               SlashAdd := Pos('/', Add);
               if SlashAdd > 0 then
               begin
-                Continuation := ParseFlagString(Copy(Add, SlashAdd + 1, MaxInt));
+                Continuation := ParseContinuationFlags(Copy(Add, SlashAdd + 1, MaxInt));
                 Add := Copy(Add, 1, SlashAdd - 1);
               end;
               if Add = '0' then Add := '';
@@ -3512,6 +3513,25 @@ begin
   else if SrcFirstUp then Result := UTF8UpperCase(UTF8Copy(S, 1, 1)) + UTF8LowerCase(UTF8Copy(S, 2, MaxInt))
   else
     Result := S;
+end;
+
+// Parses continuation flags of an affix rule. When AF aliases are defined
+// a pure numeric string is an alias number, otherwise it is a raw flag string
+function THunSpellChecker.ParseContinuationFlags(const S: string): TIntegerArray;
+var
+  AliasNum: integer = -1;
+  k: integer = 0;
+begin
+  Result := nil;
+  if S = '' then Exit;
+  if (FAFCount > 0) and TryStrToInt(S, AliasNum) and (AliasNum >= 1) and (AliasNum <= FAFCount) then
+  begin
+    SetLength(Result, Length(FAAliases[AliasNum - 1]));
+    for k := 0 to High(FAAliases[AliasNum - 1]) do
+      Result[k] := FAAliases[AliasNum - 1][k];
+    Exit;
+  end;
+  Result := ParseFlagString(S);
 end;
 
 function THunSpellChecker.Suggest(const word: string): TStringArray;
