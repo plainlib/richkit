@@ -193,10 +193,13 @@ type
     FCWCCount: integer;
     FCWCMask: integer;
     // Hash cache of compound part derivations. FPCValid distinguishes a
-    // cached success from a cached failure when the flags array is empty
+    // cached success from a cached failure when the flags array is empty.
+    // FPCReqFlag stores the required flag the entry was computed for, so the
+    // same surface part can be cached separately for begin, middle and end use
     FPCWords: array of string;
     FPCFlags: array of TIntegerArray;
     FPCValid: array of byte;
+    FPCReqFlag: array of integer;
     FPCHash: array of integer;
     FPCSize: integer;
     FPCCount: integer;
@@ -207,8 +210,8 @@ type
     procedure CWCStore(const W: string; Val: byte);
     procedure PCReset;
     procedure PCRehash;
-    function PCFind(const W: string; out Idx: integer): boolean;
-    procedure PCStore(const W: string; const Flags: TIntegerArray; Valid: boolean);
+    function PCFind(const W: string; ReqFlag: integer; out Idx: integer): boolean;
+    procedure PCStore(const W: string; ReqFlag: integer; const Flags: TIntegerArray; Valid: boolean);
 
     procedure LoadAFFFromStream(Stream: TStream);
     procedure LoadDICFromStream(Stream: TStream);
@@ -242,7 +245,7 @@ type
     function IsNoSuggestWord(const Flags: TIntegerArray): boolean;
     function IsForbiddenWord(const Flags: TIntegerArray): boolean;
     function MatchesCompoundPattern(const LeftPart, RightPart: string; const LeftFlags, RightFlags: TIntegerArray): boolean;
-    function TryGetPartFlags(const Part: string; out OutFlags: TIntegerArray): boolean;
+    function TryGetPartFlags(const Part: string; RequiredFlag: integer; out OutFlags: TIntegerArray): boolean;
     function PartCanCompoundLeft(const Flags: TIntegerArray): boolean;
     function PartCanCompoundMiddle(const Flags: TIntegerArray): boolean;
     function PartCanCompoundRight(const Flags: TIntegerArray): boolean;
@@ -1001,6 +1004,7 @@ begin
   SetLength(FPCWords, 0);
   SetLength(FPCFlags, 0);
   SetLength(FPCValid, 0);
+  SetLength(FPCReqFlag, 0);
   FPCSize := 65536;
   FPCMask := FPCSize - 1;
   SetLength(FPCHash, FPCSize);
@@ -1034,7 +1038,7 @@ begin
   SetLength(OldHash, 0);
 end;
 
-function THunSpellChecker.PCFind(const W: string; out Idx: integer): boolean;
+function THunSpellChecker.PCFind(const W: string; ReqFlag: integer; out Idx: integer): boolean;
 var
   h: cardinal = 0;
   id: integer = 0;
@@ -1046,7 +1050,7 @@ begin
   id := FPCHash[h];
   while id <> -1 do
   begin
-    if FPCWords[id] = W then
+    if (FPCWords[id] = W) and (FPCReqFlag[id] = ReqFlag) then
     begin
       Idx := id;
       Exit(True);
@@ -1056,7 +1060,7 @@ begin
   end;
 end;
 
-procedure THunSpellChecker.PCStore(const W: string; const Flags: TIntegerArray; Valid: boolean);
+procedure THunSpellChecker.PCStore(const W: string; ReqFlag: integer; const Flags: TIntegerArray; Valid: boolean);
 var
   h: cardinal = 0;
   id: integer = 0;
@@ -1069,7 +1073,7 @@ begin
   id := FPCHash[h];
   while id <> -1 do
   begin
-    if FPCWords[id] = W then
+    if (FPCWords[id] = W) and (FPCReqFlag[id] = ReqFlag) then
     begin
       SetLength(FPCFlags[id], Length(Flags));
       for i := 0 to High(Flags) do
@@ -1090,8 +1094,10 @@ begin
     SetLength(FPCWords, NewCap);
     SetLength(FPCFlags, NewCap);
     SetLength(FPCValid, NewCap);
+    SetLength(FPCReqFlag, NewCap);
   end;
   FPCWords[FPCCount] := W;
+  FPCReqFlag[FPCCount] := ReqFlag;
   SetLength(FPCFlags[FPCCount], Length(Flags));
   for i := 0 to High(Flags) do
     FPCFlags[FPCCount][i] := Flags[i];
@@ -1926,6 +1932,8 @@ var
   ExpectedWords: integer = 0;
   AliasNum: integer = 0;
   TabPos: integer = 0;
+  SpacePos: integer = 0;
+  RestStr: string = '';
 begin
   Lines := TStringList.Create;
   try
@@ -1960,8 +1968,27 @@ begin
       if Line = '' then Continue;
       if (Length(Line) > 0) and (Line[1] = '#') then Continue;
 
-      // Strip morphological data after a tab, format is word[/flags][TAB morph]
+      // Strip morphological data after a tab or a space followed by a known
+      // morphological prefix. Stavekontrolden separates the word from its
+      // morphology with a space (for example "dem st:De"), so a bare tab
+      // check is not enough. Phrases such as "a c." stay untouched because
+      // the text after the space is not a morphology prefix
       TabPos := Pos(#9, Line);
+      if TabPos = 0 then
+      begin
+        SpacePos := Pos(' ', Line);
+        while SpacePos > 0 do
+        begin
+          RestStr := Copy(Line, SpacePos + 1, 3);
+          if (RestStr = 'st:') or (RestStr = 'al:') or (RestStr = 'ph:') or (RestStr = 'ip:') or
+            (RestStr = 'ds:') or (RestStr = 'pa:') or (RestStr = 'sp:') or (RestStr = 'po:') or (RestStr = 'is:') then
+          begin
+            TabPos := SpacePos;
+            Break;
+          end;
+          SpacePos := Pos(' ', Line, SpacePos + 1);
+        end;
+      end;
       if TabPos > 0 then
         Line := Copy(Line, 1, TabPos - 1);
 
@@ -2620,25 +2647,27 @@ begin
     if not MatchesCondition(FSR.Condition, FSR.WideCondition, Prev, False) then Continue;
     // The stem must carry the rule's own flag
     if TryDerive(Prev, Depth + 1, AllowOnlyInCompound, FSR.FlagId, PrevFlags) then
-      if (RequiredFlag < 0) or HasFlag(FSR.Continuation, RequiredFlag) or HasFlag(PrevFlags, RequiredFlag) then
+    begin
+      // When the rule has no continuation flags, inherit the flags of the
+      // inner derived form so that outer levels can still see them.
+      // This enables chains such as Arabic prefix + possessive + plural.
+      if Length(FSR.Continuation) = 0 then
       begin
-        // When the rule has no continuation flags, inherit the flags of the
-        // inner derived form so that outer levels can still see them.
-        // This enables chains such as Arabic prefix + possessive + plural.
-        if Length(FSR.Continuation) = 0 then
-        begin
-          SetLength(OutFlags, Length(PrevFlags));
-          for k := 0 to High(PrevFlags) do
-            OutFlags[k] := PrevFlags[k];
-        end
-        else
-        begin
-          SetLength(OutFlags, Length(FSR.Continuation));
-          for k := 0 to High(FSR.Continuation) do
-            OutFlags[k] := FSR.Continuation[k];
-        end;
-        Exit(True);
+        SetLength(OutFlags, Length(PrevFlags));
+        for k := 0 to High(PrevFlags) do
+          OutFlags[k] := PrevFlags[k];
+      end
+      else
+      begin
+        SetLength(OutFlags, Length(FSR.Continuation));
+        for k := 0 to High(FSR.Continuation) do
+          OutFlags[k] := FSR.Continuation[k];
       end;
+      // The caller's required flag must be present in the resulting flag set.
+      // If not, keep scanning other rules instead of returning a wrong result
+      if (RequiredFlag < 0) or HasFlag(OutFlags, RequiredFlag) then
+        Exit(True);
+    end;
   end;
 
   // ---- Prefix rules ----
@@ -2667,24 +2696,24 @@ begin
     if FPR.Strip <> '' then Prev := FPR.Strip + Prev;
     if not MatchesCondition(FPR.Condition, FPR.WideCondition, Prev, True) then Continue;
     if TryDerive(Prev, Depth + 1, AllowOnlyInCompound, FPR.FlagId, PrevFlags) then
-      if (RequiredFlag < 0) or HasFlag(FPR.Continuation, RequiredFlag) or HasFlag(PrevFlags, RequiredFlag) then
+    begin
+      // Same inheritance rule as for suffixes: when the prefix rule has no
+      // continuation flags, propagate the inner flags to the caller.
+      if Length(FPR.Continuation) = 0 then
       begin
-        // Same inheritance rule as for suffixes: when the prefix rule has no
-        // continuation flags, propagate the inner flags to the caller.
-        if Length(FPR.Continuation) = 0 then
-        begin
-          SetLength(OutFlags, Length(PrevFlags));
-          for k := 0 to High(PrevFlags) do
-            OutFlags[k] := PrevFlags[k];
-        end
-        else
-        begin
-          SetLength(OutFlags, Length(FPR.Continuation));
-          for k := 0 to High(FPR.Continuation) do
-            OutFlags[k] := FPR.Continuation[k];
-        end;
-        Exit(True);
+        SetLength(OutFlags, Length(PrevFlags));
+        for k := 0 to High(PrevFlags) do
+          OutFlags[k] := PrevFlags[k];
+      end
+      else
+      begin
+        SetLength(OutFlags, Length(FPR.Continuation));
+        for k := 0 to High(FPR.Continuation) do
+          OutFlags[k] := FPR.Continuation[k];
       end;
+      if (RequiredFlag < 0) or HasFlag(OutFlags, RequiredFlag) then
+        Exit(True);
+    end;
   end;
 end;
 
@@ -2852,8 +2881,11 @@ begin
 end;
 
 // Find a compound part: a dictionary entry or a derived form via TryDerive,
-// which uses continuation flags to chain suffixes and prefixes
-function THunSpellChecker.TryGetPartFlags(const Part: string; out OutFlags: TIntegerArray): boolean;
+// which uses continuation flags to chain suffixes and prefixes.
+// RequiredFlag is forwarded to TryDerive so that a part is only accepted when
+// its derived flag set actually contains the compound flag the caller needs
+// (for example COMPOUNDBEGIN for a left part and COMPOUNDEND for a right part)
+function THunSpellChecker.TryGetPartFlags(const Part: string; RequiredFlag: integer; out OutFlags: TIntegerArray): boolean;
 var
   Count: integer = 0;
   TempFlags: TIntegerArray = nil;
@@ -2866,7 +2898,7 @@ begin
   SetLength(OutFlags, 0);
 
   // Fast path: the TryDerive result for this part may already be cached
-  if PCFind(Part, CacheIdx) then
+  if PCFind(Part, RequiredFlag, CacheIdx) then
   begin
     if FPCValid[CacheIdx] <> 0 then
     begin
@@ -2882,13 +2914,13 @@ begin
 
   if not DeriveCached then
   begin
-    Result := TryDerive(Part, 0, True, -1, OutFlags);
+    Result := TryDerive(Part, 0, True, RequiredFlag, OutFlags);
     if Result then
     begin
-      PCStore(Part, OutFlags, True);
+      PCStore(Part, RequiredFlag, OutFlags, True);
       Exit(True);
     end;
-    PCStore(Part, nil, False);
+    PCStore(Part, RequiredFlag, nil, False);
   end;
 
   // A nested compound only makes sense when compound flags are defined
@@ -2975,6 +3007,7 @@ var
   leftOk: boolean;
   LastLeft: string;
   FirstRight: string;
+  LeftFlag: integer = -1;
 begin
   Result := False;
   if word = '' then Exit;
@@ -3011,7 +3044,11 @@ begin
     end;
 
     // Left part: dictionary entry or suffix-derived form
-    if not TryGetPartFlags(leftPart, leftFlags) then Continue;
+    if depth = 0 then
+      LeftFlag := FCompoundBegin
+    else
+      LeftFlag := FCompoundMiddle;
+    if not TryGetPartFlags(leftPart, LeftFlag, leftFlags) then Continue;
 
     if depth = 0 then
       leftOk := PartCanCompoundLeft(leftFlags)
@@ -3020,7 +3057,7 @@ begin
     if not leftOk then Continue;
 
     // Option 1: right part is the final part of the compound
-    if TryGetPartFlags(rightPart, rightFlags) then
+    if TryGetPartFlags(rightPart, FCompoundEnd, rightFlags) then
     begin
       if PartCanCompoundRight(rightFlags) then
       begin
