@@ -184,6 +184,32 @@ type
     FIgnoreChars: TStringArray;
     FHasAffixContinuations: boolean;  // True when at least one affix rule carries continuation flags
     FZeroAffixEntries: TZeroAffixEntryArray;
+
+    // Hash cache of CheckWord results per word (word -> boolean result)
+    FCWCWords: array of string;
+    FCWCFlags: array of byte;
+    FCWCHash: array of integer;
+    FCWCSize: integer;
+    FCWCCount: integer;
+    FCWCMask: integer;
+    // Hash cache of compound part derivations. FPCValid distinguishes a
+    // cached success from a cached failure when the flags array is empty
+    FPCWords: array of string;
+    FPCFlags: array of TIntegerArray;
+    FPCValid: array of byte;
+    FPCHash: array of integer;
+    FPCSize: integer;
+    FPCCount: integer;
+    FPCMask: integer;
+    procedure CWCReset;
+    procedure CWCRehash;
+    function CWCFind(const W: string; out Idx: integer): boolean;
+    procedure CWCStore(const W: string; Val: byte);
+    procedure PCReset;
+    procedure PCRehash;
+    function PCFind(const W: string; out Idx: integer): boolean;
+    procedure PCStore(const W: string; const Flags: TIntegerArray; Valid: boolean);
+
     procedure LoadAFFFromStream(Stream: TStream);
     procedure LoadDICFromStream(Stream: TStream);
     function LoadAFF(const FileName: string): boolean;
@@ -874,6 +900,209 @@ begin
 end;
 
 // ---------------------------------------------------------------------------------
+// Memoization caches
+// ---------------------------------------------------------------------------------
+
+procedure THunSpellChecker.CWCReset;
+begin
+  SetLength(FCWCWords, 0);
+  SetLength(FCWCFlags, 0);
+  FCWCSize := 65536;
+  FCWCMask := FCWCSize - 1;
+  SetLength(FCWCHash, FCWCSize);
+  FillDWord(FCWCHash[0], FCWCSize, $FFFFFFFF);
+  FCWCCount := 0;
+end;
+
+procedure THunSpellChecker.CWCRehash;
+var
+  OldHash: TIntegerArray = nil;
+  OldSize: integer = 0;
+  i: integer = 0;
+  id: integer = 0;
+  h: cardinal = 0;
+begin
+  OldHash := FCWCHash;
+  OldSize := FCWCSize;
+  FCWCSize := FCWCSize * 2;
+  FCWCMask := FCWCSize - 1;
+  SetLength(FCWCHash, FCWCSize);
+  FillDWord(FCWCHash[0], FCWCSize, $FFFFFFFF);
+  for i := 0 to OldSize - 1 do
+  begin
+    id := OldHash[i];
+    if id = -1 then Continue;
+    h := FNV1aHash(FCWCWords[id]) and cardinal(FCWCMask);
+    while FCWCHash[h] <> -1 do
+      h := (h + 1) and cardinal(FCWCMask);
+    FCWCHash[h] := id;
+  end;
+  SetLength(OldHash, 0);
+end;
+
+function THunSpellChecker.CWCFind(const W: string; out Idx: integer): boolean;
+var
+  h: cardinal = 0;
+  id: integer = 0;
+begin
+  Result := False;
+  Idx := -1;
+  if FCWCSize = 0 then Exit;
+  h := FNV1aHash(W) and cardinal(FCWCMask);
+  id := FCWCHash[h];
+  while id <> -1 do
+  begin
+    if FCWCWords[id] = W then
+    begin
+      Idx := id;
+      Exit(True);
+    end;
+    h := (h + 1) and cardinal(FCWCMask);
+    id := FCWCHash[h];
+  end;
+end;
+
+procedure THunSpellChecker.CWCStore(const W: string; Val: byte);
+var
+  h: cardinal = 0;
+  id: integer = 0;
+  NewCap: integer = 0;
+begin
+  if (FCWCCount + 1) * 10 > FCWCSize * 7 then
+    CWCRehash;
+  h := FNV1aHash(W) and cardinal(FCWCMask);
+  id := FCWCHash[h];
+  while id <> -1 do
+  begin
+    if FCWCWords[id] = W then
+    begin
+      FCWCFlags[id] := Val;
+      Exit;
+    end;
+    h := (h + 1) and cardinal(FCWCMask);
+    id := FCWCHash[h];
+  end;
+  if FCWCCount = Length(FCWCWords) then
+  begin
+    if Length(FCWCWords) = 0 then NewCap := 4096
+    else
+      NewCap := Length(FCWCWords) * 2;
+    SetLength(FCWCWords, NewCap);
+    SetLength(FCWCFlags, NewCap);
+  end;
+  FCWCWords[FCWCCount] := W;
+  FCWCFlags[FCWCCount] := Val;
+  FCWCHash[h] := FCWCCount;
+  Inc(FCWCCount);
+end;
+
+procedure THunSpellChecker.PCReset;
+begin
+  SetLength(FPCWords, 0);
+  SetLength(FPCFlags, 0);
+  SetLength(FPCValid, 0);
+  FPCSize := 65536;
+  FPCMask := FPCSize - 1;
+  SetLength(FPCHash, FPCSize);
+  FillDWord(FPCHash[0], FPCSize, $FFFFFFFF);
+  FPCCount := 0;
+end;
+
+procedure THunSpellChecker.PCRehash;
+var
+  OldHash: TIntegerArray = nil;
+  OldSize: integer = 0;
+  i: integer = 0;
+  id: integer = 0;
+  h: cardinal = 0;
+begin
+  OldHash := FPCHash;
+  OldSize := FPCSize;
+  FPCSize := FPCSize * 2;
+  FPCMask := FPCSize - 1;
+  SetLength(FPCHash, FPCSize);
+  FillDWord(FPCHash[0], FPCSize, $FFFFFFFF);
+  for i := 0 to OldSize - 1 do
+  begin
+    id := OldHash[i];
+    if id = -1 then Continue;
+    h := FNV1aHash(FPCWords[id]) and cardinal(FPCMask);
+    while FPCHash[h] <> -1 do
+      h := (h + 1) and cardinal(FPCMask);
+    FPCHash[h] := id;
+  end;
+  SetLength(OldHash, 0);
+end;
+
+function THunSpellChecker.PCFind(const W: string; out Idx: integer): boolean;
+var
+  h: cardinal = 0;
+  id: integer = 0;
+begin
+  Result := False;
+  Idx := -1;
+  if FPCSize = 0 then Exit;
+  h := FNV1aHash(W) and cardinal(FPCMask);
+  id := FPCHash[h];
+  while id <> -1 do
+  begin
+    if FPCWords[id] = W then
+    begin
+      Idx := id;
+      Exit(True);
+    end;
+    h := (h + 1) and cardinal(FPCMask);
+    id := FPCHash[h];
+  end;
+end;
+
+procedure THunSpellChecker.PCStore(const W: string; const Flags: TIntegerArray; Valid: boolean);
+var
+  h: cardinal = 0;
+  id: integer = 0;
+  NewCap: integer = 0;
+  i: integer = 0;
+begin
+  if (FPCCount + 1) * 10 > FPCSize * 7 then
+    PCRehash;
+  h := FNV1aHash(W) and cardinal(FPCMask);
+  id := FPCHash[h];
+  while id <> -1 do
+  begin
+    if FPCWords[id] = W then
+    begin
+      SetLength(FPCFlags[id], Length(Flags));
+      for i := 0 to High(Flags) do
+        FPCFlags[id][i] := Flags[i];
+      if Valid then FPCValid[id] := 1
+      else
+        FPCValid[id] := 0;
+      Exit;
+    end;
+    h := (h + 1) and cardinal(FPCMask);
+    id := FPCHash[h];
+  end;
+  if FPCCount = Length(FPCWords) then
+  begin
+    if Length(FPCWords) = 0 then NewCap := 4096
+    else
+      NewCap := Length(FPCWords) * 2;
+    SetLength(FPCWords, NewCap);
+    SetLength(FPCFlags, NewCap);
+    SetLength(FPCValid, NewCap);
+  end;
+  FPCWords[FPCCount] := W;
+  SetLength(FPCFlags[FPCCount], Length(Flags));
+  for i := 0 to High(Flags) do
+    FPCFlags[FPCCount][i] := Flags[i];
+  if Valid then FPCValid[FPCCount] := 1
+  else
+    FPCValid[FPCCount] := 0;
+  FPCHash[h] := FPCCount;
+  Inc(FPCCount);
+end;
+
+// ---------------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------------
 
@@ -965,6 +1194,9 @@ begin
   FKeyGroups := TStringList.Create;
   FHasAffixContinuations := False;
   SetLength(FZeroAffixEntries, 0);
+
+  CWCReset;
+  PCReset;
 end;
 
 destructor THunSpellChecker.Destroy;
@@ -1080,6 +1312,9 @@ begin
 
     FillDWord(FHashTable[0], FHashSize, $FFFFFFFF);
 
+    CWCReset;
+    PCReset;
+
     LoadAFFFromStream(AFFStream);
     BuildAffixIndexes;
     LoadDICFromStream(DICStream);
@@ -1143,7 +1378,12 @@ begin
     FHasAffixContinuations := False;
     FAFCount := 0;
     FTryChars := '';
+
     FillDWord(FHashTable[0], FHashSize, $FFFFFFFF);
+
+    CWCReset;
+    PCReset;
+
     Result := False;
   end;
 end;
@@ -2310,7 +2550,9 @@ begin
   OutFlags := [];
   SetLength(OutFlags, 0);
   if W = '' then Exit;
-  if Depth > 2 then Exit;
+  // Maximum affix chain length. Raised from 2 to 3 to allow chains like
+  // prefix + possessive suffix + plural suffix (Arabic: ل + ات + هم).
+  if Depth > 3 then Exit;
 
   WFound := HashFind(W, WIdx);
   if WFound then WFlags := FWords[WIdx].Flags
@@ -2343,13 +2585,13 @@ begin
         OutFlags := ContFlags;
         Exit(True);
       end;
-      if Depth >= 2 then Exit(False);
+      if Depth >= 3 then Exit(False);
     end
     else if Depth > 0 then
       Exit(False);
   end;
 
-  if Depth >= 2 then Exit(False);
+  if Depth >= 3 then Exit(False);
 
   // ---- Suffix rules ----
   LastByte := Ord(W[Length(W)]);
@@ -2380,9 +2622,21 @@ begin
     if TryDerive(Prev, Depth + 1, AllowOnlyInCompound, FSR.FlagId, PrevFlags) then
       if (RequiredFlag < 0) or HasFlag(FSR.Continuation, RequiredFlag) or HasFlag(PrevFlags, RequiredFlag) then
       begin
-        SetLength(OutFlags, Length(FSR.Continuation));
-        for k := 0 to High(FSR.Continuation) do
-          OutFlags[k] := FSR.Continuation[k];
+        // When the rule has no continuation flags, inherit the flags of the
+        // inner derived form so that outer levels can still see them.
+        // This enables chains such as Arabic prefix + possessive + plural.
+        if Length(FSR.Continuation) = 0 then
+        begin
+          SetLength(OutFlags, Length(PrevFlags));
+          for k := 0 to High(PrevFlags) do
+            OutFlags[k] := PrevFlags[k];
+        end
+        else
+        begin
+          SetLength(OutFlags, Length(FSR.Continuation));
+          for k := 0 to High(FSR.Continuation) do
+            OutFlags[k] := FSR.Continuation[k];
+        end;
         Exit(True);
       end;
   end;
@@ -2415,9 +2669,20 @@ begin
     if TryDerive(Prev, Depth + 1, AllowOnlyInCompound, FPR.FlagId, PrevFlags) then
       if (RequiredFlag < 0) or HasFlag(FPR.Continuation, RequiredFlag) or HasFlag(PrevFlags, RequiredFlag) then
       begin
-        SetLength(OutFlags, Length(FPR.Continuation));
-        for k := 0 to High(FPR.Continuation) do
-          OutFlags[k] := FPR.Continuation[k];
+        // Same inheritance rule as for suffixes: when the prefix rule has no
+        // continuation flags, propagate the inner flags to the caller.
+        if Length(FPR.Continuation) = 0 then
+        begin
+          SetLength(OutFlags, Length(PrevFlags));
+          for k := 0 to High(PrevFlags) do
+            OutFlags[k] := PrevFlags[k];
+        end
+        else
+        begin
+          SetLength(OutFlags, Length(FPR.Continuation));
+          for k := 0 to High(FPR.Continuation) do
+            OutFlags[k] := FPR.Continuation[k];
+        end;
         Exit(True);
       end;
   end;
@@ -2592,9 +2857,39 @@ function THunSpellChecker.TryGetPartFlags(const Part: string; out OutFlags: TInt
 var
   Count: integer = 0;
   TempFlags: TIntegerArray = nil;
+  CacheIdx: integer = 0;
+  i: integer = 0;
+  DeriveCached: boolean = False;
 begin
-  Result := TryDerive(Part, 0, True, -1, OutFlags);
-  if Result then Exit;
+  Result := False;
+  OutFlags := [];
+  SetLength(OutFlags, 0);
+
+  // Fast path: the TryDerive result for this part may already be cached
+  if PCFind(Part, CacheIdx) then
+  begin
+    if FPCValid[CacheIdx] <> 0 then
+    begin
+      SetLength(OutFlags, Length(FPCFlags[CacheIdx]));
+      for i := 0 to High(FPCFlags[CacheIdx]) do
+        OutFlags[i] := FPCFlags[CacheIdx][i];
+      Exit(True);
+    end;
+    // A cached failure means TryDerive already returned False for this part,
+    // but the compound fallback below is still worth trying
+    DeriveCached := True;
+  end;
+
+  if not DeriveCached then
+  begin
+    Result := TryDerive(Part, 0, True, -1, OutFlags);
+    if Result then
+    begin
+      PCStore(Part, OutFlags, True);
+      Exit(True);
+    end;
+    PCStore(Part, nil, False);
+  end;
 
   // A nested compound only makes sense when compound flags are defined
   if (FCompoundFlag < 0) and (FCompoundBegin < 0) and (FCompoundMiddle < 0) and (FCompoundEnd < 0) then Exit;
@@ -2923,8 +3218,21 @@ begin
 end;
 
 function THunSpellChecker.CheckWord(const word: string): boolean;
+var
+  CacheIdx: integer = 0;
 begin
+  if CWCFind(word, CacheIdx) then
+  begin
+    Result := FCWCFlags[CacheIdx] <> 0;
+    Exit;
+  end;
+
   Result := CheckWordInternal(word, True);
+
+  if Result then
+    CWCStore(word, 1)
+  else
+    CWCStore(word, 0);
 end;
 
 // ---------------------------------------------------------------------------------
@@ -3456,6 +3764,11 @@ begin
       AddWeightedSuggestion(Weighted, FAllWords[WordIndex], Dist);
     end;
   end;
+
+  // The second pass is much more expensive because it also generates affix
+  // forms. If the tight-distance pass already produced plenty of candidates
+  // there is no point in scanning further
+  if Length(Weighted) >= 10 then Exit;
 
   MinLenExt := Max(1, TargetLen - 4);
   MaxLenExt := TargetLen + 4;
