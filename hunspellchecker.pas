@@ -2592,9 +2592,11 @@ begin
     if (FPseudoRootFlag >= 0) and HasFlag(WFlags, FPseudoRootFlag) then
       NeedAffix := True;
     OnlyInCompound := (FOnlyInCompoundFlag >= 0) and HasFlag(WFlags, FOnlyInCompoundFlag);
-    if not NeedAffix and (AllowOnlyInCompound or not OnlyInCompound) then
+    // A NEEDAFFIX / PSEUDOROOT stem is only rejected at the outer level.
+    // On nested levels (Depth > 0) the caller has already applied an
+    // affix, so the stem is legitimate and its flags must be returned.
+    if (not NeedAffix or (Depth > 0)) and (AllowOnlyInCompound or not OnlyInCompound) then
     begin
-      // Build candidate flags: WFlags plus all zero-affix continuations
       SetLength(ContFlags, Length(WFlags));
       for j := 0 to High(WFlags) do ContFlags[j] := WFlags[j];
       for r := 0 to High(FZeroAffixEntries) do
@@ -2605,17 +2607,13 @@ begin
           for j := 0 to High(FZeroAffixEntries[r].Continuation) do
             ContFlags[k + j] := FZeroAffixEntries[r].Continuation[j];
         end;
-      // Return the direct hit only if it satisfies the caller's required flag.
-      // Otherwise fall through and try affix rule derivations.
       if (RequiredFlag < 0) or HasFlag(ContFlags, RequiredFlag) then
       begin
         OutFlags := ContFlags;
         Exit(True);
       end;
       if Depth >= 3 then Exit(False);
-    end
-    else if Depth > 0 then
-      Exit(False);
+    end;
   end;
 
   if Depth >= 3 then Exit(False);
@@ -2887,7 +2885,6 @@ end;
 // (for example COMPOUNDBEGIN for a left part and COMPOUNDEND for a right part)
 function THunSpellChecker.TryGetPartFlags(const Part: string; RequiredFlag: integer; out OutFlags: TIntegerArray): boolean;
 var
-  Count: integer = 0;
   TempFlags: TIntegerArray = nil;
   CacheIdx: integer = 0;
   i: integer = 0;
@@ -2926,33 +2923,32 @@ begin
   // A nested compound only makes sense when compound flags are defined
   if (FCompoundFlag < 0) and (FCompoundBegin < 0) and (FCompoundMiddle < 0) and (FCompoundEnd < 0) then Exit;
 
+  // Nested compounds are only valid when COMPOUNDWORDMAX explicitly allows
+  // more than two parts. Hunspell's default is 2. When it is not set, a
+  // nested compound must not be accepted as a part of another compound,
+  // otherwise any valid 2-part compound becomes usable as a part and
+  // produces bogus outer compounds such as "leve" + ("stand" + "art").
+  if FCompoundWordMax < 3 then Exit;
+
   if FCompoundRecurse >= 1 then Exit;
   Inc(FCompoundRecurse);
   try
     if TryCompoundWordRec(Part, 0) then
     begin
-      SetLength(TempFlags, 4);
-      if FCompoundFlag >= 0 then
+      // A nested compound is accepted only for the flag the caller asked
+      // for. Granting all compound flags at once makes any nested compound
+      // usable as left, middle and right part simultaneously.
+      SetLength(TempFlags, 1);
+      if RequiredFlag >= 0 then
+        TempFlags[0] := RequiredFlag
+      else if FCompoundFlag >= 0 then
+        TempFlags[0] := FCompoundFlag
+      else
       begin
-        TempFlags[Count] := FCompoundFlag;
-        Inc(Count);
+        SetLength(TempFlags, 0);
+        Result := False;
+        Exit;
       end;
-      if FCompoundBegin >= 0 then
-      begin
-        TempFlags[Count] := FCompoundBegin;
-        Inc(Count);
-      end;
-      if FCompoundMiddle >= 0 then
-      begin
-        TempFlags[Count] := FCompoundMiddle;
-        Inc(Count);
-      end;
-      if FCompoundEnd >= 0 then
-      begin
-        TempFlags[Count] := FCompoundEnd;
-        Inc(Count);
-      end;
-      SetLength(TempFlags, Count);
       OutFlags := TempFlags;
       Result := True;
     end;
@@ -3013,7 +3009,9 @@ begin
   if word = '' then Exit;
 
   maxParts := FCompoundWordMax;
-  if maxParts < 2 then maxParts := 4;
+  // Hunspell's practical default. Dictionaries that need longer compounds
+  // must set COMPOUNDWORDMAX explicitly.
+  if maxParts < 2 then maxParts := 2;
   if depth >= maxParts - 1 then Exit;
 
   lenWord := UTF8Length(word);
@@ -3059,25 +3057,16 @@ begin
     // Option 1: right part is the final part of the compound
     if TryGetPartFlags(rightPart, FCompoundEnd, rightFlags) then
     begin
+      // The right part of a compound must explicitly carry COMPOUNDEND or
+      // COMPOUNDFLAG. Matching Hunspell, there is no fallback here: a word
+      // without these flags is not a valid right part, even if it is a
+      // valid dictionary word on its own.
       if PartCanCompoundRight(rightFlags) then
       begin
         if not MatchesCompoundPattern(leftPart, rightPart, leftFlags, rightFlags) then
         begin
           Result := True;
           Exit;
-        end;
-      end
-      else
-      begin
-        // Fallback: if the right part is a valid word without Cc, allow it
-        // This handles dictionaries where plural or derived forms do not inherit COMPOUNDEND
-        if not IsNoSuggestWord(rightFlags) and not IsForbiddenWord(rightFlags) then
-        begin
-          if not MatchesCompoundPattern(leftPart, rightPart, leftFlags, rightFlags) then
-          begin
-            Result := True;
-            Exit;
-          end;
         end;
       end;
     end;
