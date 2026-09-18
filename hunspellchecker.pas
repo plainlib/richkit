@@ -580,6 +580,27 @@ begin
       Result := StringReplace(Result, IgnoreChars[i], '', [rfReplaceAll]);
 end;
 
+// Removes the given flag from the array when present. Used when merging
+// duplicate dictionary entries whose special flags must not be combined
+procedure RemoveFlagFromArray(var Flags: TIntegerArray; FlagId: integer);
+var
+  i, j: integer;
+begin
+  if FlagId < 0 then Exit;
+  i := 0;
+  while i <= High(Flags) do
+  begin
+    if Flags[i] = FlagId then
+    begin
+      for j := i to High(Flags) - 1 do
+        Flags[j] := Flags[j + 1];
+      SetLength(Flags, Length(Flags) - 1);
+      Continue;
+    end;
+    Inc(i);
+  end;
+end;
+
 function THunSpellChecker.StripComment(const S: string): string;
 var
   posHash: integer;
@@ -825,6 +846,9 @@ var
   i, j: integer;
   flagExists: boolean;
   newCap: integer;
+  NewHasO, NewHasH, NewHasP: boolean;
+  ExistHasO, ExistHasH, ExistHasP: boolean;
+  DropO, DropH, DropP: boolean;
 begin
   if (FWordCount + 1) * 10 > FHashSize * 7 then
     Rehash;
@@ -835,10 +859,32 @@ begin
   begin
     if FWords[FHashTable[idx]].word = word then
     begin
-      // Merge flags
       existingFlags := FWords[FHashTable[idx]].Flags;
+
+      // Duplicate dictionary entries are merged, but the special flags
+      // ONLYINCOMPOUND, NEEDAFFIX and PSEUDOROOT must not be combined.
+      // A word that appears both as a standalone entry and as a
+      // compound-only form has to remain valid standalone. Without this
+      // rule common German verbs such as senden or werden become false
+      // errors because one of their duplicate entries carries the o flag
+      NewHasO := (FOnlyInCompoundFlag >= 0) and HasFlag(Flags, FOnlyInCompoundFlag);
+      NewHasH := (FNeedAffixFlag >= 0) and HasFlag(Flags, FNeedAffixFlag);
+      NewHasP := (FPseudoRootFlag >= 0) and HasFlag(Flags, FPseudoRootFlag);
+      ExistHasO := (FOnlyInCompoundFlag >= 0) and HasFlag(existingFlags, FOnlyInCompoundFlag);
+      ExistHasH := (FNeedAffixFlag >= 0) and HasFlag(existingFlags, FNeedAffixFlag);
+      ExistHasP := (FPseudoRootFlag >= 0) and HasFlag(existingFlags, FPseudoRootFlag);
+      DropO := NewHasO <> ExistHasO;
+      DropH := NewHasH <> ExistHasH;
+      DropP := NewHasP <> ExistHasP;
+      if DropO then RemoveFlagFromArray(existingFlags, FOnlyInCompoundFlag);
+      if DropH then RemoveFlagFromArray(existingFlags, FNeedAffixFlag);
+      if DropP then RemoveFlagFromArray(existingFlags, FPseudoRootFlag);
+
       for i := 0 to High(Flags) do
       begin
+        if DropO and (Flags[i] = FOnlyInCompoundFlag) then Continue;
+        if DropH and (Flags[i] = FNeedAffixFlag) then Continue;
+        if DropP and (Flags[i] = FPseudoRootFlag) then Continue;
         flagExists := False;
         for j := 0 to High(existingFlags) do
           if existingFlags[j] = Flags[i] then
@@ -2595,7 +2641,7 @@ begin
     // A NEEDAFFIX / PSEUDOROOT stem is only rejected at the outer level.
     // On nested levels (Depth > 0) the caller has already applied an
     // affix, so the stem is legitimate and its flags must be returned.
-    if (not NeedAffix or (Depth > 0)) and (AllowOnlyInCompound or not OnlyInCompound) then
+    if (not NeedAffix or (Depth > 0) or AllowOnlyInCompound) and (AllowOnlyInCompound or not OnlyInCompound) then
     begin
       SetLength(ContFlags, Length(WFlags));
       for j := 0 to High(WFlags) do ContFlags[j] := WFlags[j];
