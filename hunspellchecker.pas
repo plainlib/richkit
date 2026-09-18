@@ -2068,6 +2068,15 @@ begin
           FlagsArr := ParseFlagString(FlagsStr);
       end;
 
+      // Auto-tag every dictionary entry with the compound flag so that the
+      // Finnish COMPOUND directives work without marking each word in DIC.
+      // The tag is only applied when the directive is actually configured.
+      if (FCompoundFlag >= 0) and not HasFlag(FlagsArr, FCompoundFlag) then
+      begin
+        SetLength(FlagsArr, Length(FlagsArr) + 1);
+        FlagsArr[High(FlagsArr)] := FCompoundFlag;
+      end;
+
       HashAdd(word, FlagsArr);
     end;
   finally
@@ -2473,6 +2482,11 @@ var
 begin
   if Condition = '' then Exit(True);
 
+  // Fast path for the single-dot condition which matches any non-empty
+  // word. All Finnish affix rules use this condition, and decoding the
+  // word on every rule check was the main cost on that dictionary
+  if Condition = '.' then Exit(Length(word) > 0);
+
   // Fast path for plain (dot-less, bracket-less) conditions on the byte level
   if (Pos('[', Condition) = 0) and (Pos('.', Condition) = 0) then
   begin
@@ -2862,15 +2876,13 @@ end;
 function THunSpellChecker.IsNumericWord(const S: string): boolean;
 var
   i: integer;
-  Ch: string;
 begin
   Result := False;
   if S = '' then Exit;
-  for i := 1 to UTF8Length(S) do
-  begin
-    Ch := UTF8Copy(S, i, 1);
-    if (Length(Ch) <> 1) or not CharInSet(Ch[1], ['0'..'9']) then Exit;
-  end;
+  // ASCII digits are single UTF-8 bytes, so a plain byte loop is both
+  // correct and much faster than UTF8Copy per character
+  for i := 1 to Length(S) do
+    if not CharInSet(S[i], ['0'..'9']) then Exit;
   Result := True;
 end;
 
