@@ -748,12 +748,13 @@ begin
   SendMessage(Self.Handle, EM_SETPARAFORMAT, 0, LPARAM(@ParaFormat2));
   {$HINTS ON}
   {$ELSE}
+  ParaMetric := Default(TParaMetric);
   InitParaMetric(ParaMetric);
   ParaMetric.LineSpacing := DefLineSpacing;
   ParaMetric.SpaceBefore := 0;
   ParaMetric.SpaceAfter := 0;
 
-  AMemo.SetParaMetric(0, Self.GetTextLength, ParaMetric);
+  Self.SetParaMetric(0, Self.GetTextLen, ParaMetric);
   {$ENDIF}
 end;
 
