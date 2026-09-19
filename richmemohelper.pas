@@ -21,6 +21,7 @@ uses
   Clipbrd,
   {$IFDEF WINDOWS}
   Windows,
+  RichEdit,
   ActiveX,
   {$ENDIF}
   LCLType,
@@ -58,6 +59,9 @@ type
     // Get full text height
     function GetTextHeight(AText: string): integer;
 
+    // Resets line spacing and paragraph spacing to remove extra CJK gaps in RichMemo
+    procedure ResetParaSpacing;
+
     // Returns the free space below the text in the memo's client area.
     function GetBottomSpace: integer;
 
@@ -91,7 +95,7 @@ type
     procedure ClearWithUndo;
 
     // Apply memo settings and related visual properties.
-    procedure UpdateState(AIndentPixels: integer = 3);
+    procedure UpdateState(AIndentPixels: integer = 3; AResetParaSpacing: boolean = False);
   end;
 
 implementation
@@ -701,6 +705,58 @@ begin
   end;
 end;
 
+procedure TRichMemoHelper.ResetParaSpacing;
+{$IFDEF WINDOWS}
+var
+  ParaFormat2: TParaFormat2;
+  TextMetric: TTextMetric;
+  Bmp: Graphics.TBitmap;
+  LineHeightTwips: LongInt;
+{$ELSE}
+var
+  ParaMetric: TParaMetric;
+{$ENDIF}
+begin
+  if Self.HandleAllocated = False then
+    Exit;
+
+  {$IFDEF WINDOWS}
+  TextMetric := Default(TTextMetric);
+  ParaFormat2 := Default(TParaFormat2);
+
+  // Get the real font height in pixels using a temporary bitmap
+  Bmp := Graphics.TBitmap.Create;
+  try
+    Bmp.Canvas.Font.Assign(Self.Font);
+    GetTextMetrics(Bmp.Canvas.Handle, TextMetric);
+  finally
+    Bmp.Free;
+  end;
+
+  // Convert font height to twips (1 pixel = 15 twips at 96 DPI)
+  LineHeightTwips := TextMetric.tmHeight * 15;
+
+  FillChar(ParaFormat2, SizeOf(ParaFormat2), 0);
+  ParaFormat2.cbSize := SizeOf(ParaFormat2);
+  ParaFormat2.dwMask := PFM_LINESPACING or PFM_SPACEBEFORE or PFM_SPACEAFTER;
+  ParaFormat2.bLineSpacingRule := 4; // Exact line spacing
+  ParaFormat2.dyLineSpacing := LineHeightTwips;
+  ParaFormat2.dySpaceBefore := 0;
+  ParaFormat2.dySpaceAfter := 0;
+
+  {$HINTS OFF}
+  SendMessage(Self.Handle, EM_SETPARAFORMAT, 0, LPARAM(@ParaFormat2));
+  {$HINTS ON}
+  {$ELSE}
+  InitParaMetric(ParaMetric);
+  ParaMetric.LineSpacing := DefLineSpacing;
+  ParaMetric.SpaceBefore := 0;
+  ParaMetric.SpaceAfter := 0;
+
+  AMemo.SetParaMetric(0, Self.GetTextLength, ParaMetric);
+  {$ENDIF}
+end;
+
 function TRichMemoHelper.GetBottomSpace: integer;
 begin
   if Self.Text = '' then
@@ -1090,11 +1146,14 @@ begin
   Self.SelLength := 0;
 end;
 
-procedure TRichMemoHelper.UpdateState(AIndentPixels: integer = 3);
+procedure TRichMemoHelper.UpdateState(AIndentPixels: integer = 3; AResetParaSpacing: boolean = False);
 begin
   if not Self.Visible then Exit;
-  Self.SetLeftIndent(AIndentPixels);
+  if AIndentPixels > 1 then
+    Self.SetLeftIndent(AIndentPixels);
   Self.ApplyBidiMode;
+  if AResetParaSpacing then
+    Self.ResetParaSpacing;
 end;
 
 end.
