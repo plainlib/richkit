@@ -150,24 +150,38 @@ type
     bUnderlineColor: Byte;
   end;
 
+  // Windows 8 and later use a different set of underline color indices
+  // in RichEdit (red is 0x06 instead of 0x05)
+  function UsesNewUnderlineColorLayout: boolean;
+  begin
+    Result := (Win32MajorVersion > 6) or
+              ((Win32MajorVersion = 6) and (Win32MinorVersion >= 2));
+  end;
+
   function MapColorToWinUnderline(AColor: TColor): Byte;
   const
     // Windows underline color indices (user may adjust these)
     UNDERLINE_COLOR_BLACK   = 0;
-    UNDERLINE_COLOR_BLUE    = 2;
-    UNDERLINE_COLOR_GREEN   = 4;
-    UNDERLINE_COLOR_FUCHSIA = 5;
-    UNDERLINE_COLOR_RED     = 6;
+    UNDERLINE_COLOR_BLUE    = 1;
+    UNDERLINE_COLOR_GREEN   = 3;
+    UNDERLINE_COLOR_FUCHSIA = 4;
+  var
+    RedIndex: Byte;
   begin
+    if UsesNewUnderlineColorLayout then
+      RedIndex := 6  // Windows 8 and later
+    else
+      RedIndex := 5; // Windows XP, Vista, 7 and RichEdit 4.1
+
     case AColor of
       clBlack:   Result := UNDERLINE_COLOR_BLACK;
       clBlue:    Result := UNDERLINE_COLOR_BLUE;
       clGreen:   Result := UNDERLINE_COLOR_GREEN;
       clFuchsia: Result := UNDERLINE_COLOR_FUCHSIA;
-      clRed:     Result := UNDERLINE_COLOR_RED;
+      clRed:     Result := RedIndex;
     else
       // Fallback to red for any unlisted color
-      Result := UNDERLINE_COLOR_RED;
+      Result := RedIndex;
     end;
   end;
 {$ENDIF}

@@ -10,6 +10,11 @@
       <SearchPaths>
         <UnitOutputDirectory Value="lib\$(TargetCPU)-$(TargetOS)"/>
       </SearchPaths>
+      <Linking>
+        <Debugging>
+          <DebugInfoType Value="dsDwarf3"/>
+        </Debugging>
+      </Linking>
       <Other>
         <CompilerMessages>
           <IgnoredMessages idx5024="True"/>
@@ -42,7 +47,7 @@ SOFTWARE."/>
     <Files>
       <Item>
         <Filename Value="richmemocelleditor.pas"/>
-        <UnitName Value="richmemocelleditor"/>
+        <UnitName Value="RichMemoCellEditor"/>
       </Item>
       <Item>
         <Filename Value="cliptohtml.pas"/>
@@ -78,7 +83,7 @@ SOFTWARE."/>
       </Item>
       <Item>
         <Filename Value="hunspellchecker.pas"/>
-        <UnitName Value="hunspellchecker"/>
+        <UnitName Value="HunSpellChecker"/>
       </Item>
     </Files>
     <RequiredPkgs>
