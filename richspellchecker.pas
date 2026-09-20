@@ -14,8 +14,6 @@ uses
   Classes, SysUtils, Menus, Graphics, Types, ExtCtrls,
   {$IFDEF WINDOWS}
   RichMemoHelper,
-  {$ELSE}
-  RichMemoHelpers,
   {$ENDIF}
   RichMemo;
 
