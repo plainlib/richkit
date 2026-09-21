@@ -8,8 +8,8 @@ For a simplified integration, you can use the non‑visual `TSpellChecker` compo
 
 - **Lazarus** (tested with 4.8) / **Free Pascal Compiler** 3.2.2 or newer.
 - **LCLBase** – included with Lazarus.
-- **[RichMemoPackage](https://github.com/plainlib/richmemo)** – extended `TRichMemo` component with clipboard and undo helpers (available in the [plainlib](https://github.com/plainlib) repository).
-- **[Helpers](https://github.com/plainlib/helpers)** – common utility units used by the spell‑checker (also available in plainlib).
+- **[RichMemoPackage](https://github.com/plainlib/richmemo)** – a fork of the original `TRichMemo` component (available in plainlib).
+- **[Helpers](https://github.com/plainlib/helpers)** – common utility units used by the spell‑checker (available in plainlib).
 - **Windows 8 or later** is required only for the native `WinSpellChecker` backend. The **HunSpell** backend works on all platforms (Windows, Linux, macOS) and does not need any OS‑specific API.
 - Optionally, you can use the non‑visual **[TSpellChecker](https://github.com/plainlib/designkit)** component from [DesignKit](https://github.com/plainlib/designkit) for an even simpler drop‑in integration.
 
