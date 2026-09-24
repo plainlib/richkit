@@ -360,7 +360,12 @@ procedure TRichMemoHelper.PasteWithLineEnding;
 var
   s: string;
 begin
-  if Clipboard.HasFormat(CF_TEXT) or Clipboard.HasFormat(CF_UNICODETEXT) then
+  // Check for plain text or, on Windows, unicode text
+  if Clipboard.HasFormat(CF_TEXT)
+  {$IFDEF WINDOWS}
+  or Clipboard.HasFormat(CF_UNICODETEXT)
+  {$ENDIF}
+  then
   begin
     s := Clipboard.AsText;
 
