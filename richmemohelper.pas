@@ -42,6 +42,12 @@ type
     // Cut selected content to clipboard in plain text, RTF and HTML formats
     function CutToClipboardEx: boolean;
 
+    // Cut selected content to clipboard without trailing line breaks
+    procedure CutToClipboardNoTrailingLineBreak;
+
+    // Inserts clipboard text, normalizing all line endings to LineEnding.
+    procedure PasteWithLineEnding;
+
     // Detects whether the document contains rich text formatting
     function HasRichFormatting: boolean;
 
@@ -49,9 +55,6 @@ type
     // The fragment should be raw RTF content (e.g., '{\b bold}') without
     // the outer document braces and header.
     procedure InsertRtfAtCursor(const ARtf: string);
-
-    // Inserts clipboard text, normalizing all line endings to LineEnding.
-    procedure PasteWithLineEnding;
 
     // Set text bidi mode
     procedure ApplyBidiMode;
@@ -183,62 +186,6 @@ begin
 end;
 
 {$ENDIF}
-
-procedure TRichMemoHelper.InsertRtfAtCursor(const ARtf: string);
-var
-  Marker: string = '@@RTFCURSOR@@';
-  FullRtf: string;
-  OriginalRtf: string;
-  Before: string;
-  After: string;
-  MarkerPosRtf: integer;
-  MarkerPosText: integer;
-  MarkerCharPos: integer;
-begin
-  if ARtf = '' then
-    Exit;
-
-  OriginalRtf := Self.Rtf;
-
-  // Replace current selection with the marker.
-  Self.SelText := Marker;
-
-  // Get the RTF containing the marker.
-  FullRtf := Self.Rtf;
-
-  MarkerPosRtf := Pos(Marker, FullRtf);
-  if MarkerPosRtf = 0 then
-  begin
-    Self.Rtf := OriginalRtf;
-    Exit;
-  end;
-
-  // Replace the marker with the RTF fragment followed by the marker.
-  Before := Copy(FullRtf, 1, MarkerPosRtf - 1);
-  After := Copy(FullRtf, MarkerPosRtf + Length(Marker), MaxInt);
-
-  Self.Rtf := Before + ARtf + Marker + After;
-
-  // Find the marker in the resulting plain text.
-  MarkerPosText := Pos(Marker, Self.Text);
-  if MarkerPosText = 0 then
-  begin
-    Self.Rtf := OriginalRtf;
-    Exit;
-  end;
-
-  // Pos() returns a UTF-8 byte position.
-  // RichMemo.SelStart expects a character position.
-  MarkerCharPos := UTF8Length(Copy(Self.Text, 1, MarkerPosText - 1));
-
-  // Delete the marker.
-  Self.SelStart := MarkerCharPos;
-  Self.SelLength := UTF8Length(Marker);
-  Self.SelText := '';
-
-  // Cursor is now exactly where the marker was.
-  Self.SelLength := 0;
-end;
 
 function TRichMemoHelper.PasteFromClipboardEx(AUseHtmlFormat: boolean = True): boolean;
 var
@@ -390,6 +337,97 @@ begin
   {$ENDIF}
 end;
 
+procedure TRichMemoHelper.CutToClipboardNoTrailingLineBreak;
+var
+  SelectedText: string;
+begin
+  // Get the selected text from the RichMemo.
+  SelectedText := Self.SelText;
+
+  // Remove any trailing line breaks that might have been added.
+  // This loop handles both Windows (#13#10) and Linux (#10) line endings.
+  while (Length(SelectedText) > 0) and (SelectedText[Length(SelectedText)] in [#13, #10]) do
+    Delete(SelectedText, Length(SelectedText), 1);
+
+  // Put the cleaned text into the clipboard.
+  Clipboard.AsText := SelectedText;
+
+  // Now delete the selected text from the RichMemo.
+  Self.ClearSelection;
+end;
+
+procedure TRichMemoHelper.PasteWithLineEnding;
+var
+  s: string;
+begin
+  if Clipboard.HasFormat(CF_TEXT) or Clipboard.HasFormat(CF_UNICODETEXT) then
+  begin
+    s := Clipboard.AsText;
+
+    s := StringReplace(s, #13#10, #10, [rfReplaceAll]); // Windows CRLF -> LF
+    s := StringReplace(s, #13, #10, [rfReplaceAll]);   // Macintosh CR -> LF
+    s := StringReplace(s, #10, LineEnding, [rfReplaceAll]); // LF -> platform line ending
+
+    Self.SelText := s;
+  end;
+end;
+
+procedure TRichMemoHelper.InsertRtfAtCursor(const ARtf: string);
+var
+  Marker: string = '@@RTFCURSOR@@';
+  FullRtf: string;
+  OriginalRtf: string;
+  Before: string;
+  After: string;
+  MarkerPosRtf: integer;
+  MarkerPosText: integer;
+  MarkerCharPos: integer;
+begin
+  if ARtf = '' then
+    Exit;
+
+  OriginalRtf := Self.Rtf;
+
+  // Replace current selection with the marker.
+  Self.SelText := Marker;
+
+  // Get the RTF containing the marker.
+  FullRtf := Self.Rtf;
+
+  MarkerPosRtf := Pos(Marker, FullRtf);
+  if MarkerPosRtf = 0 then
+  begin
+    Self.Rtf := OriginalRtf;
+    Exit;
+  end;
+
+  // Replace the marker with the RTF fragment followed by the marker.
+  Before := Copy(FullRtf, 1, MarkerPosRtf - 1);
+  After := Copy(FullRtf, MarkerPosRtf + Length(Marker), MaxInt);
+
+  Self.Rtf := Before + ARtf + Marker + After;
+
+  // Find the marker in the resulting plain text.
+  MarkerPosText := Pos(Marker, Self.Text);
+  if MarkerPosText = 0 then
+  begin
+    Self.Rtf := OriginalRtf;
+    Exit;
+  end;
+
+  // Pos() returns a UTF-8 byte position.
+  // RichMemo.SelStart expects a character position.
+  MarkerCharPos := UTF8Length(Copy(Self.Text, 1, MarkerPosText - 1));
+
+  // Delete the marker.
+  Self.SelStart := MarkerCharPos;
+  Self.SelLength := UTF8Length(Marker);
+  Self.SelText := '';
+
+  // Cursor is now exactly where the marker was.
+  Self.SelLength := 0;
+end;
+
 function TRichMemoHelper.HasRichFormatting: boolean;
 const
   // Local list of formatting commands. \fs is included but handled specially.
@@ -506,22 +544,6 @@ begin
         searchPos := foundPos + 1;
       end;
     until foundPos = 0;
-  end;
-end;
-
-procedure TRichMemoHelper.PasteWithLineEnding;
-var
-  s: string;
-begin
-  if Clipboard.HasFormat(CF_TEXT) then
-  begin
-    s := Clipboard.AsText;
-
-    s := StringReplace(s, #13#10, #10, [rfReplaceAll]); // Windows CRLF -> LF
-    s := StringReplace(s, #13, #10, [rfReplaceAll]);   // Macintosh CR -> LF
-    s := StringReplace(s, #10, LineEnding, [rfReplaceAll]); // LF -> platform line ending
-
-    Self.SelText := s;
   end;
 end;
 
