@@ -1159,8 +1159,8 @@ var
 begin
   if Self.Text = '' then Exit;
 
-  // Calculate text length in characters because SelLength expects character count
-  TextLen := UTF8Length(Self.Text);
+  // Calculate text length in UTF-16 code units because the control uses them for SelLength
+  TextLen := Length(UTF8ToUTF16(Self.Text));
 
   // Select all text
   Self.SelStart := 0;
