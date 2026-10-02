@@ -116,6 +116,8 @@ type
   TWeightedSuggestion = record
     S: string;
     Dist: integer;
+    // Lower is better. Ranks candidates whose edits follow the TRY or KEY layout order
+    TryWeight: integer;
   end;
   TWeightedSuggestionArray = array of TWeightedSuggestion;
 
@@ -258,6 +260,7 @@ type
     function MatchesCompoundRule(const word, Rule: string): boolean;
     function IsCompoundNumber(const word: string): boolean;
     function IsNumericWord(const S: string): boolean;
+    function WordHasLetterOrDigit(const W: string): boolean;
     function IsNoSuggestWord(const Flags: TIntegerArray): boolean;
     function IsForbiddenWord(const Flags: TIntegerArray): boolean;
     function MatchesCompoundPattern(const LeftPart, RightPart: string; const LeftFlags, RightFlags: TIntegerArray): boolean;
@@ -267,7 +270,8 @@ type
     function PartCanCompoundRight(const Flags: TIntegerArray): boolean;
     function TryCompoundWordRec(const word: string; depth: integer): boolean;
     function HasFlag(const Flags: TIntegerArray; const FlagId: integer): boolean;
-    procedure AddWeightedSuggestion(var Suggestions: TWeightedSuggestionArray; const Candidate: string; Dist: integer);
+    procedure AddWeightedSuggestion(var Suggestions: TWeightedSuggestionArray; const Candidate: string;
+      Dist: integer; TryWeight: integer = 2);
     procedure GenerateAndAddAffixForms(var Suggestions: TWeightedSuggestionArray; const BaseWord: string;
       const Flags: TIntegerArray; const TargetWordLower: string);
     function StripComment(const S: string): string;
@@ -2714,7 +2718,9 @@ end;
 // Returns True if W is a valid derived form. OutFlags receives the flags of W.
 // Uses the flat rule tables and byte-level indexes for fast lookup.
 // Ctx carries the cross-product state: bit 0 means a suffix with CrossProduct=N
-// was already applied, bit 1 means a prefix with CrossProduct=N was already applied
+// was already applied, bit 1 means a prefix with CrossProduct=N was already applied.
+// AllowOnlyInCompound signals that this call runs inside a compound part lookup,
+// which enables COMPOUNDPERMITFLAG to lift the N cross-product restriction
 function THunSpellChecker.TryDerive(const W: string; Depth: integer; AllowOnlyInCompound: boolean;
   RequiredFlag: integer; Ctx: integer; out OutFlags: TIntegerArray): boolean;
 var
@@ -2732,6 +2738,8 @@ var
   NextCtx: integer = 0;
   FSR: TFlatSuffixRule;
   FPR: TFlatPrefixRule;
+  PermitSuffix: boolean = False;
+  PermitPrefix: boolean = False;
 begin
   Result := False;
   ContFlags := [];
@@ -2824,9 +2832,14 @@ begin
       Prev := Copy(W, 1, Length(W) - Length(FSR.Add));
       if FSR.Strip <> '' then Prev := Prev + FSR.Strip;
       if not MatchesCondition(FSR.Condition, FSR.WideCondition, Prev, False) then Continue;
-      // The stem must carry the rule's own flag
+      // The stem must carry the rule's own flag. A suffix with CrossProduct=N
+      // normally blocks a later prefix, but COMPOUNDPERMITFLAG lifts that
+      // restriction when we are inside a compound part lookup
       NextCtx := Ctx;
-      if not FSR.CrossProduct then NextCtx := NextCtx or 1;
+      PermitSuffix := (FCompoundPermitFlag >= 0) and HasFlag(FSR.Continuation, FCompoundPermitFlag);
+      if not FSR.CrossProduct then
+        if not (AllowOnlyInCompound and PermitSuffix) then
+          NextCtx := NextCtx or 1;
       if TryDerive(Prev, Depth + 1, AllowOnlyInCompound, FSR.FlagId, NextCtx, PrevFlags) then
       begin
         // When the rule has no continuation flags, inherit the flags of the
@@ -2893,7 +2906,10 @@ begin
       if FPR.Strip <> '' then Prev := FPR.Strip + Prev;
       if not MatchesCondition(FPR.Condition, FPR.WideCondition, Prev, True) then Continue;
       NextCtx := Ctx;
-      if not FPR.CrossProduct then NextCtx := NextCtx or 2;
+      PermitPrefix := (FCompoundPermitFlag >= 0) and HasFlag(FPR.Continuation, FCompoundPermitFlag);
+      if not FPR.CrossProduct then
+        if not (AllowOnlyInCompound and PermitPrefix) then
+          NextCtx := NextCtx or 2;
       if TryDerive(Prev, Depth + 1, AllowOnlyInCompound, FPR.FlagId, NextCtx, PrevFlags) then
       begin
         // Same inheritance rule as for suffixes: when the prefix rule has no
@@ -3028,6 +3044,43 @@ begin
   Result := True;
 end;
 
+// True when the word contains at least one letter or digit codepoint.
+// Tokens made only of WORDCHARS punctuation such as a standalone dash are
+// not words and must not be reported as spelling errors, which is important
+// for Ukrainian where a plain dash is very common in running text
+function THunSpellChecker.WordHasLetterOrDigit(const W: string): boolean;
+var
+  Ptr: pchar;
+  CharLen: integer;
+  CodePoint: cardinal;
+begin
+  Result := False;
+  if W = '' then Exit;
+  Ptr := PChar(W);
+  while Ptr^ <> #0 do
+  begin
+    {$NOTES OFF}
+    CharLen := UTF8CodepointSize(Ptr);
+    {$NOTES ON}
+    if CharLen = 1 then
+      CodePoint := Ord(Ptr^)
+    else if CharLen = 2 then
+      CodePoint := ((Ord(Ptr^) and $1F) shl 6) or (Ord((Ptr + 1)^) and $3F)
+    else if CharLen = 3 then
+      CodePoint := ((Ord(Ptr^) and $0F) shl 12) or ((Ord((Ptr + 1)^) and $3F) shl 6) or (Ord((Ptr + 2)^) and $3F)
+    else if CharLen = 4 then
+      CodePoint := ((Ord(Ptr^) and $07) shl 18) or ((Ord((Ptr + 1)^) and $3F) shl 12) or ((Ord((Ptr + 2)^) and $3F) shl 6) or
+        (Ord((Ptr + 3)^) and $3F)
+    else
+      CodePoint := 0;
+    {$NOTES OFF}
+    if (CodePoint <= $FFFF) and TCharacter.IsLetterOrDigit(widechar(CodePoint)) then
+      Exit(True);
+    {$NOTES ON}
+    Inc(Ptr, CharLen);
+  end;
+end;
+
 function THunSpellChecker.IsNoSuggestWord(const Flags: TIntegerArray): boolean;
 begin
   Result := (FNoSuggestFlag >= 0) and HasFlag(Flags, FNoSuggestFlag);
@@ -3111,6 +3164,8 @@ begin
 
   if not DeriveCached then
   begin
+    // AllowOnlyInCompound enables COMPOUNDPERMITFLAG inside the derivation
+    // so a rule with CrossProduct=N can combine when the affix is tagged
     Result := TryDerive(Part, 0, True, RequiredFlag, 0, OutFlags);
     if Result then
     begin
@@ -3494,6 +3549,12 @@ begin
   // A word made of digits only is always considered valid
   if IsNumericWord(word) then Exit(True);
 
+  // A token that has no letter and no digit is not a spelling error. This
+  // keeps standalone dashes, apostrophes and other WORDCHARS from being
+  // reported, which is required for Ukrainian where a plain dash is a very
+  // common separator in running text
+  if not WordHasLetterOrDigit(word) then Exit(True);
+
   // Direct match in DIC
   if HashFind(word, idx) then
   begin
@@ -3792,30 +3853,60 @@ end;
 // Suggestions
 // ---------------------------------------------------------------------------------
 
-procedure THunSpellChecker.AddWeightedSuggestion(var Suggestions: TWeightedSuggestionArray; const Candidate: string; Dist: integer);
+// AddWeightedSuggestion stores the candidate along with its edit distance and a
+// TRY-layout weight. TryWeight is lower-is-better: a substitution produced by a
+// neighbouring key in TRY gets 1, while other sources keep the neutral default
+// of 2. If the same candidate arrives through several routes, the best
+// (lowest) weight wins so that TRY-adjacent matches surface first
+procedure THunSpellChecker.AddWeightedSuggestion(var Suggestions: TWeightedSuggestionArray; const Candidate: string;
+  Dist: integer; TryWeight: integer = 2);
 var
-  i: integer;
+  i: integer = 0;
 begin
   if Candidate = '' then Exit;
   for i := 0 to High(Suggestions) do
-    if Suggestions[i].S = Candidate then Exit;
+    if Suggestions[i].S = Candidate then
+    begin
+      if TryWeight < Suggestions[i].TryWeight then
+        Suggestions[i].TryWeight := TryWeight;
+      Exit;
+    end;
   SetLength(Suggestions, Length(Suggestions) + 1);
   Suggestions[High(Suggestions)].S := Candidate;
   Suggestions[High(Suggestions)].Dist := Dist;
+  Suggestions[High(Suggestions)].TryWeight := TryWeight;
 end;
 
+// GenerateAndAddAffixForms produces affix forms of a dictionary word and keeps
+// only the ones within edit distance 2 of the target. The target is decoded to
+// UTF-16 once and the cheap UTF-8 length check filters out most forms before
+// the expensive wide Levenshtein call runs
 procedure THunSpellChecker.GenerateAndAddAffixForms(var Suggestions: TWeightedSuggestionArray;
   const BaseWord: string; const Flags: TIntegerArray; const TargetWordLower: string);
 var
-  i, r, idx: integer;
-  FlagId: integer;
+  i: integer = 0;
+  r: integer = 0;
+  idx: integer = 0;
+  FlagId: integer = 0;
   Group: TAffixGroup;
   RuleS: TSuffixRule;
   RuleP: TPrefixRule;
-  Stripped: string;
-  Form: string;
-  Dist: integer;
+  Stripped: string = '';
+  Form: string = '';
+  FormLower: string = '';
+  Dist: integer = 0;
+  TargetLen: integer = 0;
+  FormLen: integer = 0;
+  MinFormLen: integer = 0;
+  MaxFormLen: integer = 0;
+  TargetWide: widestring = '';
 begin
+  // Hoist the target decode and the length band out of the hot loops
+  TargetLen := UTF8Length(TargetWordLower);
+  TargetWide := UTF8Decode(TargetWordLower);
+  MinFormLen := TargetLen - 2;
+  MaxFormLen := TargetLen + 2;
+
   // Suffix forms. Iterate over the word's own flags only.
   for i := 0 to High(Flags) do
   begin
@@ -3835,8 +3926,14 @@ begin
       if RuleS.Strip <> '' then
         Delete(Stripped, Length(Stripped) - Length(RuleS.Strip) + 1, Length(RuleS.Strip));
       Form := Stripped + RuleS.Add;
-      Dist := LevenshteinDistanceLimited(TargetWordLower, UTF8LowerCase(Form), 2);
-      if (Dist <= 2) and (Form <> TargetWordLower) then
+      if Form = TargetWordLower then Continue;
+      FormLower := UTF8LowerCase(Form);
+      FormLen := UTF8Length(FormLower);
+      // The distance can never be less than the length difference, so a cheap
+      // check rejects most forms long before the wide distance runs
+      if (FormLen < MinFormLen) or (FormLen > MaxFormLen) then Continue;
+      Dist := LevenshteinWideLimited(TargetWide, UTF8Decode(FormLower), 2);
+      if Dist <= 2 then
         AddWeightedSuggestion(Suggestions, Form, Dist);
     end;
   end;
@@ -3860,8 +3957,12 @@ begin
       if RuleP.Strip <> '' then
         Delete(Stripped, 1, Length(RuleP.Strip));
       Form := RuleP.Add + Stripped;
-      Dist := LevenshteinDistanceLimited(TargetWordLower, UTF8LowerCase(Form), 2);
-      if (Dist <= 2) and (Form <> TargetWordLower) then
+      if Form = TargetWordLower then Continue;
+      FormLower := UTF8LowerCase(Form);
+      FormLen := UTF8Length(FormLower);
+      if (FormLen < MinFormLen) or (FormLen > MaxFormLen) then Continue;
+      Dist := LevenshteinWideLimited(TargetWide, UTF8Decode(FormLower), 2);
+      if Dist <= 2 then
         AddWeightedSuggestion(Suggestions, Form, Dist);
     end;
   end;
@@ -3996,6 +4097,9 @@ var
   Neighbor: string;
   Group: string;
 begin
+  // TRY substitution. The closer the replacement character sits to the
+  // original one in TRY, the lower the TryWeight, so neighbouring keys
+  // outrank distant replacements in the final ordering
   if FTryChars <> '' then
   begin
     for i := 1 to UTF8Length(CleanWord) do
@@ -4013,13 +4117,16 @@ begin
             cand := UTF8Copy(CleanWord, 1, i - 1) + repl + UTF8Copy(CleanWord, i + 1, MaxInt);
             if HashFind(cand, FoundIndex) then
               if not IsNoSuggestWord(FWords[FoundIndex].Flags) and not IsForbiddenWord(FWords[FoundIndex].Flags) then
-                AddWeightedSuggestion(Weighted, cand, LevenshteinDistanceLimited(CleanWord, cand, 2));
+                AddWeightedSuggestion(Weighted, cand, LevenshteinDistanceLimited(CleanWord, cand, 2),
+                  Abs(j - pos));
           end;
         end;
       end;
     end;
   end;
 
+  // KEY group substitution. A neighbouring key on the same physical key
+  // gets a small weight so it also outranks unrelated edits
   for i := 1 to UTF8Length(CleanWord) do
   begin
     if (FCancelFlag <> nil) and (FCancelFlag^ <> 0) then Exit;
@@ -4036,7 +4143,7 @@ begin
           cand := UTF8Copy(CleanWord, 1, i - 1) + Neighbor + UTF8Copy(CleanWord, i + 1, MaxInt);
           if HashFind(cand, FoundIndex) then
             if not IsNoSuggestWord(FWords[FoundIndex].Flags) and not IsForbiddenWord(FWords[FoundIndex].Flags) then
-              AddWeightedSuggestion(Weighted, cand, LevenshteinDistanceLimited(CleanWord, cand, 2));
+              AddWeightedSuggestion(Weighted, cand, LevenshteinDistanceLimited(CleanWord, cand, 2), 2);
         end;
         if pos < UTF8Length(Group) then
         begin
@@ -4044,12 +4151,13 @@ begin
           cand := UTF8Copy(CleanWord, 1, i - 1) + Neighbor + UTF8Copy(CleanWord, i + 1, MaxInt);
           if HashFind(cand, FoundIndex) then
             if not IsNoSuggestWord(FWords[FoundIndex].Flags) and not IsForbiddenWord(FWords[FoundIndex].Flags) then
-              AddWeightedSuggestion(Weighted, cand, LevenshteinDistanceLimited(CleanWord, cand, 2));
+              AddWeightedSuggestion(Weighted, cand, LevenshteinDistanceLimited(CleanWord, cand, 2), 2);
         end;
       end;
     end;
   end;
 
+  // Extra letter insertion at every position, limited to the first ten TRY chars
   if FTryChars <> '' then
   begin
     for i := 0 to UTF8Length(CleanWord) do
@@ -4065,6 +4173,7 @@ begin
     end;
   end;
 
+  // Delete one character
   for i := 1 to UTF8Length(CleanWord) do
   begin
     if (FCancelFlag <> nil) and (FCancelFlag^ <> 0) then Exit;
@@ -4074,6 +4183,7 @@ begin
         AddWeightedSuggestion(Weighted, cand, LevenshteinDistanceLimited(CleanWord, cand, 2));
   end;
 
+  // Swap adjacent characters
   for i := 1 to UTF8Length(CleanWord) - 1 do
   begin
     cand := UTF8Copy(CleanWord, 1, i - 1) + UTF8Copy(CleanWord, i + 1, 1) + UTF8Copy(CleanWord, i, 1) + UTF8Copy(CleanWord, i + 2, MaxInt);
@@ -4154,9 +4264,13 @@ begin
   end;
 end;
 
+// Orders candidates by edit distance first, then by TRY-layout weight.
+// Among equally distant candidates a TRY-adjacent substitution wins, which
+// matches the user expectation that a near-by key is a more likely typo
 function THunSpellChecker.CompareWeighted(const A, B: TWeightedSuggestion): integer;
 begin
   if A.Dist <> B.Dist then Result := A.Dist - B.Dist
+  else if A.TryWeight <> B.TryWeight then Result := A.TryWeight - B.TryWeight
   else
   begin
     Result := UTF8Length(A.S) - UTF8Length(B.S);
