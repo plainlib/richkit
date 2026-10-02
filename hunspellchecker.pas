@@ -68,6 +68,7 @@ type
     Continuation: TIntegerArray;
     FlagId: integer;
     IsEmpty: boolean;  // True when Add='' and Strip=''
+    CrossProduct: boolean;
   end;
   TFlatSuffixRuleArray = array of TFlatSuffixRule;
 
@@ -85,6 +86,7 @@ type
     Continuation: TIntegerArray;
     FlagId: integer;
     IsEmpty: boolean;
+    CrossProduct: boolean;
   end;
   TFlatPrefixRuleArray = array of TFlatPrefixRule;
 
@@ -99,6 +101,17 @@ type
     BeginChars: string;
     BeginFlags: TIntegerArray;
   end;
+
+  TCompoundRuleAtom = record
+    FlagId: integer;
+    Quantifier: char;
+  end;
+
+  TCompoundRule = record
+    Atoms: array of TCompoundRuleAtom;
+  end;
+
+  TCompoundRuleArray = array of TCompoundRule;
 
   TWeightedSuggestion = record
     S: string;
@@ -167,6 +180,8 @@ type
     FCompoundMin: integer;
     FCompoundWordMax: integer;
     FCompoundRules: array of string;
+    FCompoundRuleList: TCompoundRuleArray;  // Parsed COMPOUNDRULE expressions
+    FCompoundRuleFlagSet: array of boolean; // Flag ID is referenced by at least one COMPOUNDRULE
     FCheckCompoundDup: boolean;
     FCheckCompoundCase: boolean;
     FCheckCompoundPatterns: array of TCompoundPattern;
@@ -184,6 +199,7 @@ type
     FIgnoreChars: TStringArray;
     FHasAffixContinuations: boolean;  // True when at least one affix rule carries continuation flags
     FZeroAffixEntries: TZeroAffixEntryArray;
+    FFullStrip: boolean;              // FULLSTRIP directive present
 
     // Hash cache of CheckWord results per word (word -> boolean result)
     FCWCWords: array of string;
@@ -229,7 +245,7 @@ type
     procedure ShrinkAffixGroups;
     function MatchesCondition(const Condition: string; const WideCond: widestring; const word: string; IsPrefix: boolean): boolean;
     function TryDerive(const W: string; Depth: integer; AllowOnlyInCompound: boolean; RequiredFlag: integer;
-      out OutFlags: TIntegerArray): boolean;
+      Ctx: integer; out OutFlags: TIntegerArray): boolean;
     function GetWordFlags(const word: string): TIntegerArray;
     procedure HashAdd(const word: string; const Flags: TIntegerArray);
     function HashFind(const word: string; out Index: integer): boolean;
@@ -261,6 +277,12 @@ type
     function CheckWordInternal(const word: string; AllowBreak: boolean): boolean;
     function TryBreakWord(const word: string): boolean;
     function TryCompoundWord(const word: string): boolean;
+    // COMPOUNDRULE helpers
+    procedure AddCompoundRule(const S: string);
+    function MatchCompoundRuleAt(const Flags: TIntegerArray; FlagIdx: integer; const Rule: TCompoundRule; AtomIdx: integer): boolean;
+    procedure CollectCompoundFlags(const Flags: TIntegerArray; out AOut: TIntegerArray);
+    function MatchesAnyCompoundRule(const Seq: TIntegerArray): boolean;
+    function TryCompoundRuleWord(const word: string): boolean;
     procedure GenerateTryKeyCandidates(const CleanWord: string; var Weighted: TWeightedSuggestionArray);
     procedure ProcessREPandMAP(const CleanWord: string; var Weighted: TWeightedSuggestionArray);
     function LevenshteinDistanceLimited(const S1, S2: string; MaxDist: integer): integer;
@@ -443,8 +465,6 @@ begin
     list.Free;
   end;
 end;
-
-function LevenshteinDistance(const S1, S2: string): integer; forward;
 
 procedure SplitBySpaces(const S: string; Fields: TStringList);
 var
@@ -1017,6 +1037,9 @@ var
   id: integer = 0;
   NewCap: integer = 0;
 begin
+  // Bound the cache size so long-running applications do not grow forever
+  if FCWCCount >= 1000000 then
+    CWCReset;
   if (FCWCCount + 1) * 10 > FCWCSize * 7 then
     CWCRehash;
   h := FNV1aHash(W) and cardinal(FCWCMask);
@@ -1113,6 +1136,9 @@ var
   NewCap: integer = 0;
   i: integer = 0;
 begin
+  // Bound the cache size so long-running applications do not grow forever
+  if FPCCount >= 1000000 then
+    PCReset;
   if (FPCCount + 1) * 10 > FPCSize * 7 then
     PCRehash;
   h := FNV1aHash(W) and cardinal(FPCMask);
@@ -1211,6 +1237,8 @@ begin
   SetLength(FMAPGroups, 0);
   SetLength(FIgnoreChars, 0);
   SetLength(FCompoundRules, 0);
+  SetLength(FCompoundRuleList, 0);
+  SetLength(FCompoundRuleFlagSet, 0);
 
   FNoSuggestFlag := -1;
   FNeedAffixFlag := -1;
@@ -1237,6 +1265,7 @@ begin
   FCheckCompoundDup := False;
   FCheckCompoundCase := False;
   SetLength(FCheckCompoundPatterns, 0);
+  FFullStrip := False;
 
   FBreakPatterns := TStringList.Create;
   FSuggestCache := TStringList.Create;
@@ -1286,6 +1315,8 @@ begin
   SetLength(FMAPGroups, 0);
   SetLength(FIgnoreChars, 0);
   SetLength(FCompoundRules, 0);
+  SetLength(FCompoundRuleList, 0);
+  SetLength(FCompoundRuleFlagSet, 0);
   SetLength(FCheckCompoundPatterns, 0);
   SetLength(FAAliases, 0);
   SetLength(FZeroAffixEntries, 0);
@@ -1330,6 +1361,8 @@ begin
     SetLength(FWordCharsCodes, 0);
     SetLength(FIgnoreChars, 0);
     SetLength(FCompoundRules, 0);
+    SetLength(FCompoundRuleList, 0);
+    SetLength(FCompoundRuleFlagSet, 0);
     SetLength(FREPFrom, 0);
     SetLength(FREPTo, 0);
     SetLength(FAAliases, 0);
@@ -1361,6 +1394,7 @@ begin
     FHasAffixContinuations := False;
     FAFCount := 0;
     FTryChars := '';
+    FFullStrip := False;
 
     FillDWord(FHashTable[0], FHashSize, $FFFFFFFF);
 
@@ -1400,6 +1434,8 @@ begin
     SetLength(FWordCharsCodes, 0);
     SetLength(FIgnoreChars, 0);
     SetLength(FCompoundRules, 0);
+    SetLength(FCompoundRuleList, 0);
+    SetLength(FCompoundRuleFlagSet, 0);
     SetLength(FREPFrom, 0);
     SetLength(FREPTo, 0);
     SetLength(FAAliases, 0);
@@ -1430,6 +1466,7 @@ begin
     FHasAffixContinuations := False;
     FAFCount := 0;
     FTryChars := '';
+    FFullStrip := False;
 
     FillDWord(FHashTable[0], FHashSize, $FFFFFFFF);
 
@@ -1462,6 +1499,49 @@ begin
     end;
   except
     Result := False;
+  end;
+end;
+
+// Parses a single COMPOUNDRULE expression such as (12)*(12) or (2)(634)(18).
+// Atoms are parenthesized flag strings with an optional ? * + quantifier
+procedure THunSpellChecker.AddCompoundRule(const S: string);
+var
+  i, StartPos, EndPos, AtomCount: integer;
+  FlagStr: string;
+  Q: char;
+  Rule: TCompoundRule;
+begin
+  Rule := Default(TCompoundRule);
+  SetLength(Rule.Atoms, 0);
+  i := 1;
+  while i <= Length(S) do
+  begin
+    if S[i] = '(' then
+    begin
+      StartPos := i + 1;
+      EndPos := StartPos;
+      while (EndPos <= Length(S)) and (S[EndPos] <> ')') do Inc(EndPos);
+      if EndPos > Length(S) then Break;
+      FlagStr := Copy(S, StartPos, EndPos - StartPos);
+      i := EndPos + 1;
+      Q := #0;
+      if (i <= Length(S)) and (S[i] in ['?', '*', '+']) then
+      begin
+        Q := S[i];
+        Inc(i);
+      end;
+      AtomCount := Length(Rule.Atoms);
+      SetLength(Rule.Atoms, AtomCount + 1);
+      Rule.Atoms[AtomCount].FlagId := InternFlag(FlagStr);
+      Rule.Atoms[AtomCount].Quantifier := Q;
+    end
+    else
+      Inc(i);
+  end;
+  if Length(Rule.Atoms) > 0 then
+  begin
+    SetLength(FCompoundRuleList, Length(FCompoundRuleList) + 1);
+    FCompoundRuleList[High(FCompoundRuleList)] := Rule;
   end;
 end;
 
@@ -1622,6 +1702,7 @@ begin
             begin
               SetLength(FCompoundRules, Length(FCompoundRules) + 1);
               FCompoundRules[High(FCompoundRules)] := Parts[1];
+              AddCompoundRule(Parts[1]);
               Inc(i);
             end;
           end;
@@ -1634,6 +1715,10 @@ begin
       else if Parts[0] = 'CHECKCOMPOUNDCASE' then
       begin
         FCheckCompoundCase := True;
+      end
+      else if Parts[0] = 'FULLSTRIP' then
+      begin
+        FFullStrip := True;
       end
       else if Parts[0] = 'CHECKCOMPOUNDPATTERN' then
       begin
@@ -1956,6 +2041,17 @@ begin
     for i := 0 to High(FIconvFrom) do
       if FIconvFrom[i] <> '' then
         FIconvFirstBytes[Ord(FIconvFrom[i][1])] := True;
+
+    // Mark every flag that appears in any COMPOUNDRULE atom, so that
+    // CollectCompoundFlags can skip unrelated flags during compound matching
+    SetLength(FCompoundRuleFlagSet, FFlagCount);
+    for i := 0 to High(FCompoundRuleList) do
+      for j := 0 to High(FCompoundRuleList[i].Atoms) do
+      begin
+        FlagId := FCompoundRuleList[i].Atoms[j].FlagId;
+        if (FlagId >= 0) and (FlagId < FFlagCount) then
+          FCompoundRuleFlagSet[FlagId] := True;
+      end;
 
     // Trim reserved capacity before the tables are used for lookups
     ShrinkAffixGroups;
@@ -2344,6 +2440,7 @@ begin
       FlatS.Continuation := SrcSuffix.Continuation;
       FlatS.FlagId := FSuffixRules[i].Flag;
       FlatS.IsEmpty := (SrcSuffix.Add = '') and (SrcSuffix.Strip = '');
+      FlatS.CrossProduct := FSuffixRules[i].Group.CrossProduct;
       FSuffixFlat[High(FSuffixFlat)] := FlatS;
     end;
 
@@ -2361,6 +2458,7 @@ begin
       FlatP.Continuation := SrcPrefix.Continuation;
       FlatP.FlagId := FPrefixRules[i].Flag;
       FlatP.IsEmpty := (SrcPrefix.Add = '') and (SrcPrefix.Strip = '');
+      FlatP.CrossProduct := FPrefixRules[i].Group.CrossProduct;
       FPrefixFlat[High(FPrefixFlat)] := FlatP;
     end;
 
@@ -2615,8 +2713,10 @@ end;
 
 // Returns True if W is a valid derived form. OutFlags receives the flags of W.
 // Uses the flat rule tables and byte-level indexes for fast lookup.
+// Ctx carries the cross-product state: bit 0 means a suffix with CrossProduct=N
+// was already applied, bit 1 means a prefix with CrossProduct=N was already applied
 function THunSpellChecker.TryDerive(const W: string; Depth: integer; AllowOnlyInCompound: boolean;
-  RequiredFlag: integer; out OutFlags: TIntegerArray): boolean;
+  RequiredFlag: integer; Ctx: integer; out OutFlags: TIntegerArray): boolean;
 var
   j, r, k, FlatIdx: integer;
   WIdx: integer = 0;
@@ -2629,6 +2729,7 @@ var
   OnlyInCompound: boolean;
   LastByte: byte = 0;
   FirstByte: byte = 0;
+  NextCtx: integer = 0;
   FSR: TFlatSuffixRule;
   FPR: TFlatPrefixRule;
 begin
@@ -2638,7 +2739,7 @@ begin
   SetLength(OutFlags, 0);
   if W = '' then Exit;
   // Maximum affix chain length. Raised from 2 to 3 to allow chains like
-  // prefix + possessive suffix + plural suffix (Arabic: ل + ات + هم).
+  // prefix + possessive suffix + plural suffix (Arabic: л + ات + هم).
   if Depth > 3 then Exit;
 
   WFound := HashFind(W, WIdx);
@@ -2650,6 +2751,10 @@ begin
   begin
     NeedAffix := (FNeedAffixFlag >= 0) and HasFlag(WFlags, FNeedAffixFlag);
     if (FPseudoRootFlag >= 0) and HasFlag(WFlags, FPseudoRootFlag) then
+      NeedAffix := True;
+    // Words marked with CIRCUMFIX require both a prefix and a suffix to be valid.
+    // At depth 0 they behave like NEEDAFFIX, the outer level enforces the pairing
+    if (FCircumfixFlag >= 0) and HasFlag(WFlags, FCircumfixFlag) then
       NeedAffix := True;
     OnlyInCompound := (FOnlyInCompoundFlag >= 0) and HasFlag(WFlags, FOnlyInCompoundFlag);
     // A NEEDAFFIX / PSEUDOROOT stem is only rejected at the outer level.
@@ -2679,98 +2784,135 @@ begin
   if Depth >= 3 then Exit(False);
 
   // ---- Suffix rules ----
-  LastByte := Ord(W[Length(W)]);
-  for r := 0 to High(FSuffixByLastByte[LastByte]) do
+  // A suffix with CrossProduct=N blocks any later prefix, so skip the whole
+  // suffix pass when a prefix with CrossProduct=N has already been applied
+  if (Ctx and 2) = 0 then
   begin
-    if (FCancelFlag <> nil) and (FCancelFlag^ <> 0) then Exit;
-    FlatIdx := FSuffixByLastByte[LastByte][r];
-    FSR := FSuffixFlat[FlatIdx];
-
-    if FSR.IsEmpty then
+    LastByte := Ord(W[Length(W)]);
+    for r := 0 to High(FSuffixByLastByte[LastByte]) do
     begin
-      if WFound and HasFlag(WFlags, FSR.FlagId) and not IsForbiddenWord(WFlags) then
-        if (RequiredFlag < 0) or HasFlag(FSR.Continuation, RequiredFlag) then
+      if (FCancelFlag <> nil) and (FCancelFlag^ <> 0) then Exit;
+      FlatIdx := FSuffixByLastByte[LastByte][r];
+      FSR := FSuffixFlat[FlatIdx];
+
+      if FSR.IsEmpty then
+      begin
+        if WFound and HasFlag(WFlags, FSR.FlagId) and not IsForbiddenWord(WFlags) then
+          if (RequiredFlag < 0) or HasFlag(FSR.Continuation, RequiredFlag) then
+          begin
+            // When the zero-affix rule carries no continuation flags the
+            // word's own flags are propagated so outer levels can still
+            // see them. This matches the behaviour of the non-empty path.
+            if Length(FSR.Continuation) = 0 then
+            begin
+              SetLength(OutFlags, Length(WFlags));
+              for k := 0 to High(WFlags) do
+                OutFlags[k] := WFlags[k];
+            end
+            else
+            begin
+              SetLength(OutFlags, Length(FSR.Continuation));
+              for k := 0 to High(FSR.Continuation) do
+                OutFlags[k] := FSR.Continuation[k];
+            end;
+            Exit(True);
+          end;
+        Continue;
+      end;
+
+      if not ByteEndsWith(FSR.Add, W) then Continue;
+      Prev := Copy(W, 1, Length(W) - Length(FSR.Add));
+      if FSR.Strip <> '' then Prev := Prev + FSR.Strip;
+      if not MatchesCondition(FSR.Condition, FSR.WideCondition, Prev, False) then Continue;
+      // The stem must carry the rule's own flag
+      NextCtx := Ctx;
+      if not FSR.CrossProduct then NextCtx := NextCtx or 1;
+      if TryDerive(Prev, Depth + 1, AllowOnlyInCompound, FSR.FlagId, NextCtx, PrevFlags) then
+      begin
+        // When the rule has no continuation flags, inherit the flags of the
+        // inner derived form so that outer levels can still see them.
+        // This enables chains such as Arabic prefix + possessive + plural.
+        if Length(FSR.Continuation) = 0 then
+        begin
+          SetLength(OutFlags, Length(PrevFlags));
+          for k := 0 to High(PrevFlags) do
+            OutFlags[k] := PrevFlags[k];
+        end
+        else
         begin
           SetLength(OutFlags, Length(FSR.Continuation));
           for k := 0 to High(FSR.Continuation) do
             OutFlags[k] := FSR.Continuation[k];
-          Exit(True);
         end;
-      Continue;
-    end;
-
-    if not ByteEndsWith(FSR.Add, W) then Continue;
-    Prev := Copy(W, 1, Length(W) - Length(FSR.Add));
-    if FSR.Strip <> '' then Prev := Prev + FSR.Strip;
-    if not MatchesCondition(FSR.Condition, FSR.WideCondition, Prev, False) then Continue;
-    // The stem must carry the rule's own flag
-    if TryDerive(Prev, Depth + 1, AllowOnlyInCompound, FSR.FlagId, PrevFlags) then
-    begin
-      // When the rule has no continuation flags, inherit the flags of the
-      // inner derived form so that outer levels can still see them.
-      // This enables chains such as Arabic prefix + possessive + plural.
-      if Length(FSR.Continuation) = 0 then
-      begin
-        SetLength(OutFlags, Length(PrevFlags));
-        for k := 0 to High(PrevFlags) do
-          OutFlags[k] := PrevFlags[k];
-      end
-      else
-      begin
-        SetLength(OutFlags, Length(FSR.Continuation));
-        for k := 0 to High(FSR.Continuation) do
-          OutFlags[k] := FSR.Continuation[k];
+        // The caller's required flag must be present in the resulting flag set.
+        // If not, keep scanning other rules instead of returning a wrong result
+        if (RequiredFlag < 0) or HasFlag(OutFlags, RequiredFlag) then
+          Exit(True);
       end;
-      // The caller's required flag must be present in the resulting flag set.
-      // If not, keep scanning other rules instead of returning a wrong result
-      if (RequiredFlag < 0) or HasFlag(OutFlags, RequiredFlag) then
-        Exit(True);
     end;
   end;
 
   // ---- Prefix rules ----
-  FirstByte := Ord(W[1]);
-  for r := 0 to High(FPrefixByFirstByte[FirstByte]) do
+  // Symmetric to the suffix pass: a prefix with CrossProduct=N blocks any
+  // later suffix, so skip the prefix pass when a suffix with N is in Ctx
+  if (Ctx and 1) = 0 then
   begin
-    if (FCancelFlag <> nil) and (FCancelFlag^ <> 0) then Exit;
-    FlatIdx := FPrefixByFirstByte[FirstByte][r];
-    FPR := FPrefixFlat[FlatIdx];
-
-    if FPR.IsEmpty then
+    FirstByte := Ord(W[1]);
+    for r := 0 to High(FPrefixByFirstByte[FirstByte]) do
     begin
-      if WFound and HasFlag(WFlags, FPR.FlagId) and not IsForbiddenWord(WFlags) then
-        if (RequiredFlag < 0) or HasFlag(FPR.Continuation, RequiredFlag) then
+      if (FCancelFlag <> nil) and (FCancelFlag^ <> 0) then Exit;
+      FlatIdx := FPrefixByFirstByte[FirstByte][r];
+      FPR := FPrefixFlat[FlatIdx];
+
+      if FPR.IsEmpty then
+      begin
+        if WFound and HasFlag(WFlags, FPR.FlagId) and not IsForbiddenWord(WFlags) then
+          if (RequiredFlag < 0) or HasFlag(FPR.Continuation, RequiredFlag) then
+          begin
+            // Zero-affix prefix behaves like the zero-affix suffix above:
+            // when Continuation is empty, propagate the word's own flags
+            if Length(FPR.Continuation) = 0 then
+            begin
+              SetLength(OutFlags, Length(WFlags));
+              for k := 0 to High(WFlags) do
+                OutFlags[k] := WFlags[k];
+            end
+            else
+            begin
+              SetLength(OutFlags, Length(FPR.Continuation));
+              for k := 0 to High(FPR.Continuation) do
+                OutFlags[k] := FPR.Continuation[k];
+            end;
+            Exit(True);
+          end;
+        Continue;
+      end;
+
+      if not ByteStartsWith(FPR.Add, W) then Continue;
+      Prev := Copy(W, Length(FPR.Add) + 1, MaxInt);
+      if FPR.Strip <> '' then Prev := FPR.Strip + Prev;
+      if not MatchesCondition(FPR.Condition, FPR.WideCondition, Prev, True) then Continue;
+      NextCtx := Ctx;
+      if not FPR.CrossProduct then NextCtx := NextCtx or 2;
+      if TryDerive(Prev, Depth + 1, AllowOnlyInCompound, FPR.FlagId, NextCtx, PrevFlags) then
+      begin
+        // Same inheritance rule as for suffixes: when the prefix rule has no
+        // continuation flags, propagate the inner flags to the caller.
+        if Length(FPR.Continuation) = 0 then
+        begin
+          SetLength(OutFlags, Length(PrevFlags));
+          for k := 0 to High(PrevFlags) do
+            OutFlags[k] := PrevFlags[k];
+        end
+        else
         begin
           SetLength(OutFlags, Length(FPR.Continuation));
           for k := 0 to High(FPR.Continuation) do
             OutFlags[k] := FPR.Continuation[k];
-          Exit(True);
         end;
-      Continue;
-    end;
-
-    if not ByteStartsWith(FPR.Add, W) then Continue;
-    Prev := Copy(W, Length(FPR.Add) + 1, MaxInt);
-    if FPR.Strip <> '' then Prev := FPR.Strip + Prev;
-    if not MatchesCondition(FPR.Condition, FPR.WideCondition, Prev, True) then Continue;
-    if TryDerive(Prev, Depth + 1, AllowOnlyInCompound, FPR.FlagId, PrevFlags) then
-    begin
-      // Same inheritance rule as for suffixes: when the prefix rule has no
-      // continuation flags, propagate the inner flags to the caller.
-      if Length(FPR.Continuation) = 0 then
-      begin
-        SetLength(OutFlags, Length(PrevFlags));
-        for k := 0 to High(PrevFlags) do
-          OutFlags[k] := PrevFlags[k];
-      end
-      else
-      begin
-        SetLength(OutFlags, Length(FPR.Continuation));
-        for k := 0 to High(FPR.Continuation) do
-          OutFlags[k] := FPR.Continuation[k];
+        if (RequiredFlag < 0) or HasFlag(OutFlags, RequiredFlag) then
+          Exit(True);
       end;
-      if (RequiredFlag < 0) or HasFlag(OutFlags, RequiredFlag) then
-        Exit(True);
     end;
   end;
 end;
@@ -2969,7 +3111,7 @@ begin
 
   if not DeriveCached then
   begin
-    Result := TryDerive(Part, 0, True, RequiredFlag, OutFlags);
+    Result := TryDerive(Part, 0, True, RequiredFlag, 0, OutFlags);
     if Result then
     begin
       PCStore(Part, RequiredFlag, OutFlags, True);
@@ -3018,6 +3160,7 @@ end;
 function THunSpellChecker.PartCanCompoundLeft(const Flags: TIntegerArray): boolean;
 begin
   Result := False;
+  if (FCompoundForbidFlag >= 0) and HasFlag(Flags, FCompoundForbidFlag) then Exit(False);
   if (FCompoundFlag >= 0) and HasFlag(Flags, FCompoundFlag) then Exit(True);
   if (FCompoundBegin >= 0) and HasFlag(Flags, FCompoundBegin) then Exit(True);
 end;
@@ -3025,6 +3168,7 @@ end;
 function THunSpellChecker.PartCanCompoundMiddle(const Flags: TIntegerArray): boolean;
 begin
   Result := False;
+  if (FCompoundForbidFlag >= 0) and HasFlag(Flags, FCompoundForbidFlag) then Exit(False);
   if (FCompoundFlag >= 0) and HasFlag(Flags, FCompoundFlag) then Exit(True);
   if (FCompoundMiddle >= 0) and HasFlag(Flags, FCompoundMiddle) then Exit(True);
 end;
@@ -3032,6 +3176,7 @@ end;
 function THunSpellChecker.PartCanCompoundRight(const Flags: TIntegerArray): boolean;
 begin
   Result := False;
+  if (FCompoundForbidFlag >= 0) and HasFlag(Flags, FCompoundForbidFlag) then Exit(False);
   if (FCompoundFlag >= 0) and HasFlag(Flags, FCompoundFlag) then Exit(True);
   if (FCompoundEnd >= 0) and HasFlag(Flags, FCompoundEnd) then Exit(True);
 end;
@@ -3131,6 +3276,151 @@ begin
 
     // Option 2: right part contains further compound parts
     if TryCompoundWordRec(rightPart, depth + 1) then Exit(True);
+  end;
+end;
+
+// ---------------------------------------------------------------------------------
+// COMPOUNDRULE support
+// ---------------------------------------------------------------------------------
+
+// Recursive atom matcher. The flags array is a sequence of candidate flag IDs
+// drawn from the compound parts, and the rule is the parsed pattern. Quantifiers
+// ? * + are handled by trying every valid repetition count.
+function THunSpellChecker.MatchCompoundRuleAt(const Flags: TIntegerArray; FlagIdx: integer; const Rule: TCompoundRule;
+  AtomIdx: integer): boolean;
+var
+  Atom: TCompoundRuleAtom;
+  Count, k: integer;
+begin
+  if AtomIdx > High(Rule.Atoms) then
+    Exit(FlagIdx > High(Flags));
+  Atom := Rule.Atoms[AtomIdx];
+  if Atom.Quantifier = #0 then
+  begin
+    if (FlagIdx > High(Flags)) or (Flags[FlagIdx] <> Atom.FlagId) then Exit(False);
+    Exit(MatchCompoundRuleAt(Flags, FlagIdx + 1, Rule, AtomIdx + 1));
+  end;
+  if Atom.Quantifier = '?' then
+  begin
+    if (FlagIdx <= High(Flags)) and (Flags[FlagIdx] = Atom.FlagId) then
+      if MatchCompoundRuleAt(Flags, FlagIdx + 1, Rule, AtomIdx + 1) then Exit(True);
+    Exit(MatchCompoundRuleAt(Flags, FlagIdx, Rule, AtomIdx + 1));
+  end;
+  if (Atom.Quantifier = '*') or (Atom.Quantifier = '+') then
+  begin
+    Count := 0;
+    while (FlagIdx + Count <= High(Flags)) and (Flags[FlagIdx + Count] = Atom.FlagId) do
+      Inc(Count);
+    if Atom.Quantifier = '+' then
+    begin
+      for k := Count downto 1 do
+        if MatchCompoundRuleAt(Flags, FlagIdx + k, Rule, AtomIdx + 1) then Exit(True);
+    end
+    else
+    begin
+      for k := Count downto 0 do
+        if MatchCompoundRuleAt(Flags, FlagIdx + k, Rule, AtomIdx + 1) then Exit(True);
+    end;
+    Exit(False);
+  end;
+  Result := False;
+end;
+
+// Extract from a word's flags only those that participate in some COMPOUNDRULE.
+// FCompoundRuleFlagSet is built once after the AFF is loaded, so the check
+// is a single array lookup per flag
+procedure THunSpellChecker.CollectCompoundFlags(const Flags: TIntegerArray; out AOut: TIntegerArray);
+var
+  i, n: integer;
+begin
+  n := 0;
+  AOut := nil;
+  SetLength(AOut, Length(Flags));
+  for i := 0 to High(Flags) do
+    if (Flags[i] >= 0) and (Flags[i] < Length(FCompoundRuleFlagSet)) and FCompoundRuleFlagSet[Flags[i]] then
+    begin
+      AOut[n] := Flags[i];
+      Inc(n);
+    end;
+  SetLength(AOut, n);
+end;
+
+function THunSpellChecker.MatchesAnyCompoundRule(const Seq: TIntegerArray): boolean;
+var
+  i: integer;
+begin
+  for i := 0 to High(FCompoundRuleList) do
+    if MatchCompoundRuleAt(Seq, 0, FCompoundRuleList[i], 0) then Exit(True);
+  Result := False;
+end;
+
+// Enumerates 2-part and 3-part splits of the given word and checks every
+// combination of compound-relevant flags against the parsed COMPOUNDRULE
+// expressions. Only dictionary entries are used as parts, not derived forms,
+// which keeps the search bounded and fast enough for the common cases
+function THunSpellChecker.TryCompoundRuleWord(const word: string): boolean;
+var
+  i, j, k, l, Len, Idx: integer;
+  Left, Middle, Right: string;
+  LF, MF, RF, Seq: TIntegerArray;
+begin
+  Result := False;
+  Seq := nil;
+  if Length(FCompoundRuleList) = 0 then Exit;
+  Len := UTF8Length(word);
+  if Len < 2 then Exit;
+
+  // Two-part compounds
+  for i := 1 to Len - 1 do
+  begin
+    if (FCancelFlag <> nil) and (FCancelFlag^ <> 0) then Exit;
+    Left := UTF8Copy(word, 1, i);
+    Right := UTF8Copy(word, i + 1, MaxInt);
+    if not HashFind(Left, Idx) then Continue;
+    CollectCompoundFlags(FWords[Idx].Flags, LF);
+    if Length(LF) = 0 then Continue;
+    if not HashFind(Right, Idx) then Continue;
+    CollectCompoundFlags(FWords[Idx].Flags, RF);
+    if Length(RF) = 0 then Continue;
+    SetLength(Seq, 2);
+    for j := 0 to High(LF) do
+      for k := 0 to High(RF) do
+      begin
+        Seq[0] := LF[j];
+        Seq[1] := RF[k];
+        if MatchesAnyCompoundRule(Seq) then Exit(True);
+      end;
+  end;
+
+  // Three-part compounds
+  if Len < 3 then Exit;
+  for i := 1 to Len - 2 do
+  begin
+    Left := UTF8Copy(word, 1, i);
+    if not HashFind(Left, Idx) then Continue;
+    CollectCompoundFlags(FWords[Idx].Flags, LF);
+    if Length(LF) = 0 then Continue;
+    for j := i + 1 to Len - 1 do
+    begin
+      if (FCancelFlag <> nil) and (FCancelFlag^ <> 0) then Exit;
+      Middle := UTF8Copy(word, i + 1, j - i);
+      Right := UTF8Copy(word, j + 1, MaxInt);
+      if not HashFind(Middle, Idx) then Continue;
+      CollectCompoundFlags(FWords[Idx].Flags, MF);
+      if Length(MF) = 0 then Continue;
+      if not HashFind(Right, Idx) then Continue;
+      CollectCompoundFlags(FWords[Idx].Flags, RF);
+      if Length(RF) = 0 then Continue;
+      SetLength(Seq, 3);
+      for k := 0 to High(LF) do
+        for l := 0 to High(MF) do
+        begin
+          Seq[0] := LF[k];
+          Seq[1] := MF[l];
+          Seq[2] := RF[0];
+          if MatchesAnyCompoundRule(Seq) then Exit(True);
+        end;
+    end;
   end;
 end;
 
@@ -3238,14 +3528,19 @@ begin
   end;
 
   // Derived forms via affixes with continuation flag chaining
-  if TryDerive(word, 0, False, -1, DerivedFlags) then Exit(True);
-  if (LowerWord <> word) and TryDerive(LowerWord, 0, False, -1, DerivedFlags) then Exit(True);
+  if TryDerive(word, 0, False, -1, 0, DerivedFlags) then Exit(True);
+  if (LowerWord <> word) and TryDerive(LowerWord, 0, False, -1, 0, DerivedFlags) then Exit(True);
 
   if AllowBreak and (FBreakPatterns.Count > 0) then
     if TryBreakWord(word) then Exit(True);
 
   if (FCompoundFlag >= 0) or (FCompoundBegin >= 0) or (FCompoundMiddle >= 0) or (FCompoundEnd >= 0) then
     if TryCompoundWord(word) then Exit(True);
+
+  // COMPOUNDRULE is a separate mechanism from the flag-based compound check.
+  // It is only tried when the corresponding AFF directive was loaded
+  if Length(FCompoundRuleList) > 0 then
+    if TryCompoundRuleWord(word) then Exit(True);
 
   Result := False;
 end;
@@ -3570,30 +3865,6 @@ begin
         AddWeightedSuggestion(Suggestions, Form, Dist);
     end;
   end;
-end;
-
-function LevenshteinDistance(const S1, S2: string): integer;
-var
-  Wide1, Wide2: widestring;
-  Len1, Len2, i, j: integer;
-  D: array of array of integer;
-begin
-  D := nil;
-  Wide1 := UTF8Decode(S1);
-  Wide2 := UTF8Decode(S2);
-  Len1 := Length(Wide1);
-  Len2 := Length(Wide2);
-  SetLength(D, Len1 + 1, Len2 + 1);
-  for i := 0 to Len1 do D[i, 0] := i;
-  for j := 0 to Len2 do D[0, j] := j;
-  for i := 1 to Len1 do
-    for j := 1 to Len2 do
-    begin
-      if Wide1[i] = Wide2[j] then D[i, j] := D[i - 1, j - 1]
-      else
-        D[i, j] := Min(Min(D[i - 1, j] + 1, D[i, j - 1] + 1), D[i - 1, j - 1] + 1);
-    end;
-  Result := D[Len1, Len2];
 end;
 
 // String wrapper: decodes both operands and calls the wide version
