@@ -103,8 +103,16 @@ procedure DrawSpellErrors(ARichMemo: TRichMemo; const AErrors: TSpellErrorArray)
 implementation
 
 {$IFDEF WINDOWS}
-uses
-  Windows, LCLType, ComObj, Variants;
+  uses Windows, LCLType, ComObj, Variants;
+{$ENDIF}
+{$IFDEF LCLGTK2}
+  uses gtk2, gdk2, glib2;
+{$ENDIF}
+{$IFDEF LCLGTK3}
+  uses gtk3, gdk3, glib2;
+{$ENDIF}
+
+{$IFDEF WINDOWS}
 
 const
   EM_EXSETSEL = WM_USER + 55;
@@ -191,6 +199,48 @@ type
 
 {%Region -fold Standalone methods}
 
+// Wraps a batch of formatting calls into a single GTK user action and
+// freezes child-notify signals so the widget is not redrawn after every
+// SetRangeParams. This is the closest GTK equivalent of WM_SETREDRAW and
+// it removes both the visible jitter and most of the lag on large batches.
+// On other widget sets the procedures are no-ops.
+{$IF defined(LCLGTK2) or defined(LCLGTK3)}
+procedure GtkBeginBatch(ARichMemo: TRichMemo);
+var
+  Widget: PGtkWidget;
+begin
+  if not Assigned(ARichMemo) then
+    Exit;
+  Widget := PGtkWidget(ARichMemo.Handle);
+  if Widget = nil then
+    Exit;
+  gtk_widget_freeze_child_notify(Widget);
+  gtk_text_buffer_begin_user_action(gtk_text_view_get_buffer(GTK_TEXT_VIEW(Widget)));
+end;
+
+procedure GtkEndBatch(ARichMemo: TRichMemo);
+var
+  Widget: PGtkWidget;
+begin
+  if not Assigned(ARichMemo) then
+    Exit;
+  Widget := PGtkWidget(ARichMemo.Handle);
+  if Widget = nil then
+    Exit;
+  gtk_text_buffer_end_user_action(gtk_text_view_get_buffer(GTK_TEXT_VIEW(Widget)));
+  gtk_widget_thaw_child_notify(Widget);
+end;
+{$ELSE}
+
+procedure GtkBeginBatch(ARichMemo: TRichMemo);
+begin
+end;
+
+procedure GtkEndBatch(ARichMemo: TRichMemo);
+begin
+end;
+{$IFEND}
+
 procedure DrawSpellErrorsBatch(ARichMemo: TRichMemo; AErrors: TList; AStartIndex: integer = 0);
 var
   i: integer;
@@ -250,17 +300,31 @@ begin
   // Lines.BeginUpdate (which is available cross-platform), apply all
   // underlines, and restore the selection only at the end. This removes
   // both the per error scroll jump and most of the lag.
-  ARichMemo.Lines.BeginUpdate;
+  // The selection is restored only when it actually changed: on GTK even a
+  // no-op SelStart assignment makes the widget scroll the caret back into
+  // view, which would reset the user's scroll position every time underlines
+  // are applied in the background (for example during a visible-only check).
+  // GtkBeginBatch/GtkEndBatch group all formatting changes into a single
+  // user action and freeze child-notify signals, so the widget is redrawn
+  // once at the end instead of after every error.
+  GtkBeginBatch(ARichMemo);
   try
-    for i := AStartIndex to AErrors.Count - 1 do
-      DrawSpellUnderline(ARichMemo,
-        PSpellError(AErrors[i])^.Offset,
-        PSpellError(AErrors[i])^.Length,
-        PSpellError(AErrors[i])^.Color);
+    ARichMemo.Lines.BeginUpdate;
+    try
+      for i := AStartIndex to AErrors.Count - 1 do
+        DrawSpellUnderline(ARichMemo,
+          PSpellError(AErrors[i])^.Offset,
+          PSpellError(AErrors[i])^.Length,
+          PSpellError(AErrors[i])^.Color);
+    finally
+      if ARichMemo.SelStart <> OldSelStart then
+        ARichMemo.SelStart := OldSelStart;
+      if ARichMemo.SelLength <> OldSelLength then
+        ARichMemo.SelLength := OldSelLength;
+      ARichMemo.Lines.EndUpdate;
+    end;
   finally
-    ARichMemo.SelStart := OldSelStart;
-    ARichMemo.SelLength := OldSelLength;
-    ARichMemo.Lines.EndUpdate;
+    GtkEndBatch(ARichMemo);
   end;
   {$ENDIF}
 end;
@@ -351,6 +415,9 @@ var
   cf: CHARFORMAT2W;
   cr: CHARRANGE;
   scrollPos: TPoint;
+{$ELSE}
+var
+  OldSelStart, OldSelLength: integer;
 {$ENDIF}
 begin
   {$IFDEF WINDOWS}
@@ -403,16 +470,41 @@ begin
   if Length(ARichMemo.Text) = 0 then
     Exit;
 
-  ARichMemo.SetRangeParams(
-    0,
-    Length(ARichMemo.Text),
-    [tmm_Styles, tmm_Color],
-    '',
-    0,
-    clWindowText,
-    [],
-    [fsUnderline]
-    );
+  // On GTK every SetRangeParams call updates the widget synchronously, and
+  // the selection may be modified as a side effect, which in turn scrolls
+  // the view to the caret. Save the selection once, wrap the whole clear in
+  // BeginUpdate/EndUpdate to suppress intermediate repaints, and restore the
+  // selection only when it actually changed. This keeps the user's scroll
+  // position stable while underlines are cleared and redrawn in background.
+  // GtkBeginBatch/GtkEndBatch collapse the call into one user action, so the
+  // widget is redrawn once instead of after each internal change.
+  OldSelStart := ARichMemo.SelStart;
+  OldSelLength := ARichMemo.SelLength;
+
+  GtkBeginBatch(ARichMemo);
+  try
+    ARichMemo.Lines.BeginUpdate;
+    try
+      ARichMemo.SetRangeParams(
+        0,
+        Length(ARichMemo.Text),
+        [tmm_Styles, tmm_Color],
+        '',
+        0,
+        clWindowText,
+        [],
+        [fsUnderline]
+        );
+    finally
+      if ARichMemo.SelStart <> OldSelStart then
+        ARichMemo.SelStart := OldSelStart;
+      if ARichMemo.SelLength <> OldSelLength then
+        ARichMemo.SelLength := OldSelLength;
+      ARichMemo.Lines.EndUpdate;
+    end;
+  finally
+    GtkEndBatch(ARichMemo);
+  end;
   {$ENDIF}
 end;
 
@@ -879,6 +971,9 @@ var
   scrollPos: TPoint;
   cf: CHARFORMAT2W;
   cr: CHARRANGE;
+{$ELSE}
+var
+  OldSelStart, OldSelLength: integer;
 {$ENDIF}
 begin
   {$IFDEF WINDOWS}
@@ -924,12 +1019,47 @@ begin
   finally
     FRichMemo.ResumeUndo;
   end;
+  {$ELSE}
+  if not Assigned(FRichMemo) or (AError = nil) then
+    Exit;
+
+  // On GTK and macOS, replace the whole range with an unstyled one. Save
+  // and restore the selection only when it actually changed, otherwise the
+  // widget would scroll the caret back into view on every call.
+  // GtkBeginBatch/GtkEndBatch keep the change and the surrounding selection
+  // restore inside a single user action, so the widget redraws once.
+  OldSelStart := FRichMemo.SelStart;
+  OldSelLength := FRichMemo.SelLength;
+  GtkBeginBatch(FRichMemo);
+  try
+    FRichMemo.Lines.BeginUpdate;
+    try
+      FRichMemo.SetRangeParams(
+        AError^.Offset,
+        ANewLength,
+        [tmm_Styles, tmm_Color],
+        '',
+        0,
+        clWindowText,
+        [],
+        [fsUnderline]
+        );
+    finally
+      if FRichMemo.SelStart <> OldSelStart then
+        FRichMemo.SelStart := OldSelStart;
+      if FRichMemo.SelLength <> OldSelLength then
+        FRichMemo.SelLength := OldSelLength;
+      FRichMemo.Lines.EndUpdate;
+    end;
+  finally
+    GtkEndBatch(FRichMemo);
+  end;
+  {$ENDIF}
 
   // Remove error from list
   FErrors.Remove(AError);
   // Replacements is now a managed dynamic array, no manual Free needed
   Dispose(AError);
-  {$ENDIF}
 end;
 
 {%EndRegion}
