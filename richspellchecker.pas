@@ -244,18 +244,24 @@ begin
     ARichMemo.ResumeUndo;
   end;
   {$ELSE}
-  for i := AStartIndex to AErrors.Count - 1 do
-  begin
-    DrawSpellUnderline(ARichMemo,
-      PSpellError(AErrors[i])^.Offset,
-      PSpellError(AErrors[i])^.Length,
-      PSpellError(AErrors[i])^.Color);
+  // On GTK every SetRangeParams call schedules a synchronous widget update,
+  // and restoring the selection after each error forces the view to scroll
+  // to the caret. Save the selection once, block intermediate repaints via
+  // Lines.BeginUpdate (which is available cross-platform), apply all
+  // underlines, and restore the selection only at the end. This removes
+  // both the per error scroll jump and most of the lag.
+  ARichMemo.Lines.BeginUpdate;
+  try
+    for i := AStartIndex to AErrors.Count - 1 do
+      DrawSpellUnderline(ARichMemo,
+        PSpellError(AErrors[i])^.Offset,
+        PSpellError(AErrors[i])^.Length,
+        PSpellError(AErrors[i])^.Color);
+  finally
     ARichMemo.SelStart := OldSelStart;
     ARichMemo.SelLength := OldSelLength;
+    ARichMemo.Lines.EndUpdate;
   end;
-
-  ARichMemo.SelStart := OldSelStart;
-  ARichMemo.SelLength := OldSelLength;
   {$ENDIF}
 end;
 
