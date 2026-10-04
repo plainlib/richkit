@@ -41,6 +41,7 @@ type
     FApplyImmediately: boolean;
     FContextCaretPos: integer; // caret position when context menu was invoked
     FUpdateLock: integer; // blocks context menu while updates are in progress
+    FErrorsAtBeginUpdate: integer; // error count when the outermost BeginUpdate was called
     FTargetPopupMenu: TPopupMenu; // external popup menu to host replacements
     FInjectedItems: TList; // dynamically added menu items for later removal
     FSubMenu: boolean; // if True, create a submenu for suggestions
@@ -68,6 +69,10 @@ type
     procedure EndUpdate;
     procedure AddError(AOffset, ALength: integer; const AMessage: string; const AReplacements: array of string; AColor: TColor = clRed);
     procedure ApplyUnderlines;
+    // Draws only errors from AStartIndex to the end of the list. Used by
+    // EndUpdate to avoid redrawing the entire accumulated error list on
+    // every incremental update, which would be O(N^2) across many chunks.
+    procedure ApplyUnderlinesFrom(AStartIndex: integer);
     function ShowContextMenu(X, Y: integer): boolean;
     procedure ReplaceError(AError: PSpellError; const ANewText: string; NewCaretPos: integer = -1);
     // Remove a single error from the list and clear its underline
@@ -87,7 +92,7 @@ type
 // cleared here - callers decide whether a clear is needed first. Used both
 // by TRichSpellChecker.ApplyUnderlines (list of pointers) and by the
 // standalone DrawSpellErrors (array of records).
-procedure DrawSpellErrorsBatch(ARichMemo: TRichMemo; AErrors: TList);
+procedure DrawSpellErrorsBatch(ARichMemo: TRichMemo; AErrors: TList; AStartIndex: integer = 0);
 // Standalone helpers that draw or clear spell-check underlines on any RichMemo
 // without creating a TRichSpellChecker instance. Handy when the same text is
 // shown in more than one control and all of them need the same underlines.
@@ -186,7 +191,7 @@ type
 
 {%Region -fold Standalone methods}
 
-procedure DrawSpellErrorsBatch(ARichMemo: TRichMemo; AErrors: TList);
+procedure DrawSpellErrorsBatch(ARichMemo: TRichMemo; AErrors: TList; AStartIndex: integer = 0);
 var
   i: integer;
   {$IFDEF WINDOWS}
@@ -195,6 +200,10 @@ var
   OldSelStart, OldSelLength: integer;
 begin
   if not Assigned(ARichMemo) then
+    Exit;
+  if AStartIndex < 0 then
+    AStartIndex := 0;
+  if AStartIndex >= AErrors.Count then
     Exit;
 
   // Save caret position
@@ -213,7 +222,7 @@ begin
     // Block repainting while applying all underlines
     SendMessage(ARichMemo.Handle, WM_SETREDRAW, 0, 0);
     try
-      for i := 0 to AErrors.Count - 1 do
+      for i := AStartIndex to AErrors.Count - 1 do
       begin
         DrawSpellUnderline(ARichMemo,
           PSpellError(AErrors[i])^.Offset,
@@ -235,7 +244,7 @@ begin
     ARichMemo.ResumeUndo;
   end;
   {$ELSE}
-  for i := 0 to AErrors.Count - 1 do
+  for i := AStartIndex to AErrors.Count - 1 do
   begin
     DrawSpellUnderline(ARichMemo,
       PSpellError(AErrors[i])^.Offset,
@@ -416,6 +425,7 @@ begin
   FApplyImmediately := True;
   FContextCaretPos := -1;
   FUpdateLock := 0;
+  FErrorsAtBeginUpdate := 0;
   FTargetPopupMenu := nil;
   FSubMenu := False;
   FSubMenuCaption := 'Suggestions';
@@ -469,13 +479,22 @@ begin
     FErrors.Delete(i);
   end;
   FCurrentError := nil;
+  // Reset the incremental draw marker. Any errors added after this point
+  // must be treated as new, because the visual underlines were just wiped.
+  FErrorsAtBeginUpdate := 0;
   ClearUnderlines;
 end;
 
 procedure TRichSpellChecker.BeginUpdate;
 begin
   if FUpdateLock = 0 then
+  begin
     FMenu.Close; // close context menu if it is open
+    // Remember how many errors already exist. EndUpdate will only redraw
+    // the errors that are added after this point, keeping incremental
+    // spell checking linear instead of quadratic.
+    FErrorsAtBeginUpdate := FErrors.Count;
+  end;
   Inc(FUpdateLock);
   FApplyImmediately := False;
 end;
@@ -486,7 +505,10 @@ begin
   if FUpdateLock < 0 then
     FUpdateLock := 0; // safety guard against unbalanced calls
   FApplyImmediately := True;
-  ApplyUnderlines;
+  // Redraw only errors added since the outermost BeginUpdate. A full
+  // ApplyUnderlines would touch every accumulated error on every chunk,
+  // turning the total work into O(N^2) for large documents.
+  ApplyUnderlinesFrom(FErrorsAtBeginUpdate);
 end;
 
 procedure TRichSpellChecker.ClearUnderlines;
@@ -525,6 +547,11 @@ end;
 procedure TRichSpellChecker.ApplyUnderlines;
 begin
   DrawSpellErrorsBatch(FRichMemo, FErrors);
+end;
+
+procedure TRichSpellChecker.ApplyUnderlinesFrom(AStartIndex: integer);
+begin
+  DrawSpellErrorsBatch(FRichMemo, FErrors, AStartIndex);
 end;
 
 function TRichSpellChecker.GetErrorAtTextPos(ATextPos: integer): PSpellError;
