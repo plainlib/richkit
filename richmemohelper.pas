@@ -19,6 +19,7 @@ uses
   SysUtils,
   StrUtils,
   Clipbrd,
+  ExtCtrls,
   {$IFDEF WINDOWS}
   Windows,
   RichEdit,
@@ -33,6 +34,18 @@ uses
 type
   TRichMemoHelper = class helper(TRichEditForMemo) for TRichMemo
   public
+    procedure EnableUndo;
+    procedure DisableUndo;
+    function IsUndoEnabled: boolean;
+    procedure BeginUndoBatch;
+    procedure EndUndoBatch;
+    procedure PushUndoSnapshot;
+    procedure UndoEx;
+    procedure RedoEx;
+    function CanUndo: boolean;
+    function CanRedo: boolean;
+    procedure ClearUndoHistory;
+
     // Paste HTML content from clipboard as RTF at cursor position
     function PasteFromClipboardEx(AUseHtmlFormat: boolean = True): boolean;
 
@@ -104,16 +117,21 @@ type
 implementation
 
 uses
+  Forms,
   HtmlToRtf,
   {$IFDEF WINDOWS}
   RtfToHtml,
   clipboardhelper,
   {$ENDIF}
+  {$IFDEF LCLGTK2}
+  gtk2,
+  glib2,
+  {$ENDIF}
   ClipToHtml,
   stringhelper,
   controlshelper;
 
-{$IFDEF WINDOWS}
+  {$IFDEF WINDOWS}
 
 const
   SCROLLBAR_FIX_TIMER_ID = 1;
@@ -185,7 +203,767 @@ begin
     ParentPanel.SetComposited(NeedComposited);
 end;
 
+  {$ENDIF}
+
+type
+  TSnapshotKind = (skNone, skText, skRtf);
+
+  TRichMemoSnapshot = record
+    Kind: TSnapshotKind;
+    PrefixChars: integer;
+    OldTailChars: integer;
+    NewTailChars: integer;
+    OldTail: string;
+    NewTail: string;
+    Rtf: string;
+    SelStart: integer;
+    SelLength: integer;
+  end;
+
+  TRichMemoSnapshotArray = array of TRichMemoSnapshot;
+
+  TRichMemoBaseline = record
+    Rtf: string;
+    Text: string;
+    SelStart: integer;
+    SelLength: integer;
+  end;
+
+{$IFDEF LCLGTK2}
+
+  var
+    GCachedHandleValue: TLCLHandle = 0;
+    GCachedView: PGtkTextView = nil;
+
+function GetGtkTextViewFromMemo(AMemo: TCustomRichMemo): PGtkTextView;
+var
+  W: PGtkWidget;
+  List: PGList;
+  H: TLCLHandle;
+begin
+  Result := nil;
+  if not AMemo.HandleAllocated then Exit;
+
+  // Cache the underlying PGtkTextView per handle: gtk_container_get_children
+  // allocates a GList on every call, and this helper is invoked on every
+  // caret move and every formatting operation, so the allocation becomes
+  // measurable on GTK.
+  H := TLCLHandle(AMemo.Handle);
+  if H = GCachedHandleValue then
+    Exit(GCachedView);
+
+  {$HINTS OFF}
+  W := PGtkWidget(PtrUInt(H));
+  {$HINTS ON}
+  if not Assigned(W) then Exit;
+  List := gtk_container_get_children(PGtkContainer(W));
+  if not Assigned(List) then Exit;
+  Result := PGtkTextView(List^.data);
+  g_list_free(List);
+
+  GCachedHandleValue := H;
+  GCachedView := Result;
+end;
+
+procedure EmitGtkClipboardSignal(AMemo: TCustomRichMemo; const ASignalName: string);
+var
+  View: PGtkTextView;
+begin
+  View := GetGtkTextViewFromMemo(AMemo);
+  if not Assigned(View) then Exit;
+  g_signal_emit_by_name(View, PChar(ASignalName));
+end;
+
+procedure GetCaretGTK2(AMemo: TCustomRichMemo; out AStart, ALen: Integer);
+var
+  View: PGtkTextView;
+  Buf: PGtkTextBuffer;
+  ItStart: TGtkTextIter;
+  ItEnd: TGtkTextIter;
+  Mark: PGtkTextMark;
+begin
+  AStart := 0;
+  ALen := 0;
+  View := GetGtkTextViewFromMemo(AMemo);
+  if not Assigned(View) then Exit;
+  Buf := gtk_text_view_get_buffer(View);
+  if not Assigned(Buf) then Exit;
+
+  if gtk_text_buffer_get_selection_bounds(Buf, @ItStart, @ItEnd) then
+  begin
+    AStart := gtk_text_iter_get_offset(@ItStart);
+    ALen := gtk_text_iter_get_offset(@ItEnd) - AStart;
+    if ALen < 0 then
+    begin
+      AStart := AStart + ALen;
+      ALen := -ALen;
+    end;
+  end
+  else
+  begin
+    Mark := gtk_text_buffer_get_insert(Buf);
+    if Assigned(Mark) then
+    begin
+      gtk_text_buffer_get_iter_at_mark(Buf, @ItStart, Mark);
+      AStart := gtk_text_iter_get_offset(@ItStart);
+    end;
+  end;
+end;
+
+procedure ApplyCaretGTK2(AMemo: TCustomRichMemo; APos, ALen: Integer);
+var
+  View: PGtkTextView;
+  Buf: PGtkTextBuffer;
+  ItStart: TGtkTextIter;
+  ItEnd: TGtkTextIter;
+  Mark: PGtkTextMark;
+begin
+  View := GetGtkTextViewFromMemo(AMemo);
+  if not Assigned(View) then Exit;
+  Buf := gtk_text_view_get_buffer(View);
+  if not Assigned(Buf) then Exit;
+
+  gtk_text_buffer_get_iter_at_offset(Buf, @ItStart, APos);
+  if ALen > 0 then
+  begin
+    gtk_text_buffer_get_iter_at_offset(Buf, @ItEnd, APos + ALen);
+    gtk_text_buffer_select_range(Buf, @ItStart, @ItEnd);
+  end
+  else
+    gtk_text_buffer_place_cursor(Buf, @ItStart);
+
+  Mark := gtk_text_buffer_get_insert(Buf);
+  if Assigned(Mark) then
+    gtk_text_view_scroll_to_mark(View, Mark, 0.0, True, 0.0, 0.5);
+end;
+
 {$ENDIF}
+
+procedure GetCaretState(AMemo: TRichMemo; out AStart, ALen: integer);
+begin
+  {$IFDEF LCLGTK2}
+  GetCaretGTK2(AMemo, AStart, ALen);
+  {$ELSE}
+  AStart := AMemo.SelStart;
+  ALen := AMemo.SelLength;
+  {$ENDIF}
+end;
+
+procedure SetCaretState(AMemo: TRichMemo; AStart, ALen: integer);
+begin
+  {$IFDEF LCLGTK2}
+  ApplyCaretGTK2(AMemo, AStart, ALen);
+  {$ELSE}
+  AMemo.SelStart := AStart;
+  AMemo.SelLength := ALen;
+  {$ENDIF}
+end;
+
+procedure ComputeDiff(const AOldText, ANewText: string; out APrefixChars, AOldTailChars, ANewTailChars: integer;
+  out AOldTail, ANewTail: string);
+var
+  OldUC, NewUC: unicodestring;
+  P, S, MaxS, OldLen, NewLen: integer;
+begin
+  OldUC := UTF8Decode(AOldText);
+  NewUC := UTF8Decode(ANewText);
+  OldLen := Length(OldUC);
+  NewLen := Length(NewUC);
+
+  P := 0;
+  while (P < OldLen) and (P < NewLen) and (OldUC[P + 1] = NewUC[P + 1]) do
+    Inc(P);
+
+  MaxS := Min(OldLen - P, NewLen - P);
+  S := 0;
+  while (S < MaxS) and (OldUC[OldLen - S] = NewUC[NewLen - S]) do
+    Inc(S);
+
+  APrefixChars := P;
+  AOldTailChars := OldLen - P - S;
+  ANewTailChars := NewLen - P - S;
+  AOldTail := UTF8Encode(Copy(OldUC, P + 1, AOldTailChars));
+  ANewTail := UTF8Encode(Copy(NewUC, P + 1, ANewTailChars));
+end;
+
+const
+  MaxUndoSnapshots = 200;
+  UndoDebounceMs = 600;
+
+var
+  GTrackers: TFPList = nil;
+
+procedure PushSnapshot(var A: TRichMemoSnapshotArray; const S: TRichMemoSnapshot; AMax: integer);
+var
+  i: integer;
+begin
+  if Length(A) >= AMax then
+  begin
+    for i := 0 to AMax - 2 do
+      A[i] := A[i + 1];
+    SetLength(A, AMax - 1);
+  end;
+  SetLength(A, Length(A) + 1);
+  A[High(A)] := S;
+end;
+
+function PopSnapshot(var A: TRichMemoSnapshotArray; out S: TRichMemoSnapshot): boolean;
+begin
+  Result := Length(A) > 0;
+  if not Result then Exit;
+  S := A[High(A)];
+  SetLength(A, Length(A) - 1);
+end;
+
+type
+  TRichMemoUndoTracker = class
+  public
+    Memo: TRichMemo;
+    Baseline: TRichMemoBaseline;
+    UndoStack: TRichMemoSnapshotArray;
+    RedoStack: TRichMemoSnapshotArray;
+    Timer: TTimer;
+    Suppress: boolean;
+    FInChange: boolean;
+    FInUndoRedo: boolean;
+    FBatchDepth: integer;
+    FDestroyed: boolean;
+    UserOnChange: TNotifyEvent;
+    UserOnSelectionChange: TNotifyEvent;
+    PendingCaretPos: integer;
+    PendingCaretLen: integer;
+    HasPendingCaret: boolean;
+    FBaselineStale: boolean;
+    FTrackRtfChanges: boolean;
+    constructor Create(AMemo: TRichMemo);
+    destructor Destroy; override;
+    procedure BeginBatch;
+    procedure EndBatch;
+    procedure HandleChange(Sender: TObject);
+    procedure HandleSelectionChange(Sender: TObject);
+    procedure HandleTimer(Sender: TObject);
+    procedure ApplyPendingCaret(Data: PtrInt);
+    procedure CaptureBaseline;
+    function BuildSnapshot: TRichMemoSnapshot;
+    procedure CommitPendingChange;
+    procedure MarkBaselineStale;
+    procedure ApplyUndo(const S: TRichMemoSnapshot);
+    procedure ApplyRedo(const S: TRichMemoSnapshot);
+  end;
+
+function FindTracker(AMemo: TRichMemo): TRichMemoUndoTracker;
+var
+  i: integer;
+begin
+  Result := nil;
+  if not Assigned(GTrackers) then Exit;
+  for i := 0 to GTrackers.Count - 1 do
+  begin
+    Result := TRichMemoUndoTracker(GTrackers[i]);
+    if Result.Memo = AMemo then Exit;
+  end;
+  Result := nil;
+end;
+
+constructor TRichMemoUndoTracker.Create(AMemo: TRichMemo);
+begin
+  inherited Create;
+  Memo := AMemo;
+  Suppress := False;
+  FInChange := False;
+  FInUndoRedo := False;
+  FBatchDepth := 0;
+  FDestroyed := False;
+  HasPendingCaret := False;
+  FBaselineStale := False;
+  {$IFDEF LCLGTK2}
+  // Serializing the whole RTF buffer on GTK is extremely expensive and runs
+  // on every idle tick, which is the main source of stalls during typing.
+  // Text changes are still detected through Memo.Text. Formatting-only
+  // changes are captured on explicit PushUndoSnapshot calls instead.
+  FTrackRtfChanges := False;
+  {$ELSE}
+  FTrackRtfChanges := True;
+  {$ENDIF}
+  UserOnChange := AMemo.OnChange;
+  UserOnSelectionChange := AMemo.OnSelectionChange;
+  Timer := TTimer.Create(AMemo);
+  Timer.Interval := UndoDebounceMs;
+  Timer.Enabled := False;
+  Timer.OnTimer := @HandleTimer;
+  CaptureBaseline;
+end;
+
+destructor TRichMemoUndoTracker.Destroy;
+begin
+  FDestroyed := True;
+  Timer.Enabled := False;
+  inherited Destroy;
+end;
+
+procedure TRichMemoUndoTracker.BeginBatch;
+begin
+  Inc(FBatchDepth);
+  if FBatchDepth = 1 then
+    Timer.Enabled := False;
+end;
+
+procedure TRichMemoUndoTracker.EndBatch;
+begin
+  if FBatchDepth > 0 then Dec(FBatchDepth);
+end;
+
+procedure TRichMemoUndoTracker.CaptureBaseline;
+begin
+  Baseline.Text := Memo.Text;
+  if FTrackRtfChanges then
+    Baseline.Rtf := Memo.Rtf;
+  GetCaretState(Memo, Baseline.SelStart, Baseline.SelLength);
+  // A full refresh clears the stale flag: the RTF baseline now matches the
+  // current document state.
+  FBaselineStale := False;
+end;
+
+function TRichMemoUndoTracker.BuildSnapshot: TRichMemoSnapshot;
+var
+  CurText, CurRtf: string;
+  CurSelStart, CurSelLength: integer;
+begin
+  Result := Default(TRichMemoSnapshot);
+  FillChar(Result, SizeOf(Result), 0);
+
+  CurText := Memo.Text;
+  GetCaretState(Memo, CurSelStart, CurSelLength);
+
+  Result.SelStart := CurSelStart;
+  Result.SelLength := CurSelLength;
+
+  if Length(CurText) <> Length(Baseline.Text) then
+  begin
+    Result.Kind := skText;
+    ComputeDiff(Baseline.Text, CurText, Result.PrefixChars,
+      Result.OldTailChars, Result.NewTailChars, Result.OldTail, Result.NewTail);
+    Exit;
+  end;
+
+  if CurText <> Baseline.Text then
+  begin
+    Result.Kind := skText;
+    ComputeDiff(Baseline.Text, CurText, Result.PrefixChars,
+      Result.OldTailChars, Result.NewTailChars, Result.OldTail, Result.NewTail);
+    Exit;
+  end;
+
+  // Text is unchanged. If the RTF baseline is stale, the only difference is
+  // our own service formatting applied via SuspendUndo/ResumeUndo, so it
+  // must not be reported as a user change. HandleTimer refreshes the stale
+  // baseline during the next idle window.
+  if FBaselineStale then
+    Exit;
+
+  // When RTF tracking is disabled we cannot cheaply tell whether the user
+  // changed formatting only. Skip the RTF comparison entirely: on GTK
+  // calling Memo.Rtf here is what makes typing stall on large documents.
+  if not FTrackRtfChanges then
+    Exit;
+
+  CurRtf := Memo.Rtf;
+  if CurRtf <> Baseline.Rtf then
+  begin
+    Result.Kind := skRtf;
+    Result.Rtf := Baseline.Rtf;
+    Exit;
+  end;
+
+  Result.Kind := skNone;
+end;
+
+procedure TRichMemoUndoTracker.CommitPendingChange;
+var
+  Snap: TRichMemoSnapshot;
+begin
+  Snap := BuildSnapshot;
+  if Snap.Kind = skNone then Exit;
+  Snap.SelStart := Baseline.SelStart;
+  Snap.SelLength := Baseline.SelLength;
+  PushSnapshot(UndoStack, Snap, MaxUndoSnapshots);
+  SetLength(RedoStack, 0);
+  CaptureBaseline;
+end;
+
+procedure TRichMemoUndoTracker.MarkBaselineStale;
+begin
+  // Service formatting (spell-check underlines) changed the RTF but not the
+  // text. Do not serialize the whole RTF snapshot here: on Linux this can
+  // stall the UI for seconds while the user is still interacting. Mark the
+  // baseline as stale instead and let the debounce timer refresh it during
+  // the next idle window.
+  FBaselineStale := True;
+  Timer.Enabled := False;
+  Timer.Enabled := True;
+end;
+
+procedure TRichMemoUndoTracker.ApplyPendingCaret(Data: PtrInt);
+begin
+  if not HasPendingCaret then Exit;
+  HasPendingCaret := False;
+  if FDestroyed then Exit;
+  if not Assigned(Memo) then Exit;
+  if not Memo.HandleAllocated then Exit;
+  SetCaretState(Memo, PendingCaretPos, PendingCaretLen);
+end;
+
+procedure TRichMemoUndoTracker.ApplyUndo(const S: TRichMemoSnapshot);
+var
+  CaretPos, CaretLen: integer;
+begin
+  case S.Kind of
+    skText:
+    begin
+      Memo.SelStart := S.PrefixChars;
+      Memo.SelLength := S.NewTailChars;
+      Memo.SelText := S.OldTail;
+      CaretPos := S.PrefixChars + S.OldTailChars;
+      CaretLen := 0;
+      {$IFDEF LCLGTK2}
+        PendingCaretPos := CaretPos;
+        PendingCaretLen := CaretLen;
+        HasPendingCaret := True;
+        Application.QueueAsyncCall(@ApplyPendingCaret, 0);
+      {$ELSE}
+      SetCaretState(Memo, CaretPos, CaretLen);
+      {$ENDIF}
+    end;
+    skRtf:
+    begin
+      Memo.Rtf := S.Rtf;
+      {$IFDEF LCLGTK2}
+        PendingCaretPos := S.SelStart;
+        PendingCaretLen := S.SelLength;
+        HasPendingCaret := True;
+        Application.QueueAsyncCall(@ApplyPendingCaret, 0);
+      {$ELSE}
+      SetCaretState(Memo, S.SelStart, S.SelLength);
+      {$ENDIF}
+    end;
+  end;
+end;
+
+procedure TRichMemoUndoTracker.ApplyRedo(const S: TRichMemoSnapshot);
+var
+  CaretPos, CaretLen: integer;
+begin
+  case S.Kind of
+    skText:
+    begin
+      Memo.SelStart := S.PrefixChars;
+      Memo.SelLength := S.OldTailChars;
+      Memo.SelText := S.NewTail;
+      CaretPos := S.PrefixChars + S.NewTailChars;
+      CaretLen := 0;
+      {$IFDEF LCLGTK2}
+        PendingCaretPos := CaretPos;
+        PendingCaretLen := CaretLen;
+        HasPendingCaret := True;
+        Application.QueueAsyncCall(@ApplyPendingCaret, 0);
+      {$ELSE}
+      SetCaretState(Memo, CaretPos, CaretLen);
+      {$ENDIF}
+    end;
+    skRtf:
+    begin
+      Memo.Rtf := S.Rtf;
+      {$IFDEF LCLGTK2}
+        PendingCaretPos := S.SelStart;
+        PendingCaretLen := S.SelLength;
+        HasPendingCaret := True;
+        Application.QueueAsyncCall(@ApplyPendingCaret, 0);
+      {$ELSE}
+      SetCaretState(Memo, S.SelStart, S.SelLength);
+      {$ENDIF}
+    end;
+  end;
+end;
+
+procedure TRichMemoUndoTracker.HandleChange(Sender: TObject);
+begin
+  if Suppress or FInChange then Exit;
+  FInChange := True;
+  try
+    // During a batch skip everything, the caller commits changes explicitly
+    if FBatchDepth > 0 then Exit;
+    // Suppress the user handler during undo and redo, spellcheck would go mad
+    if FInUndoRedo then Exit;
+
+    Timer.Enabled := False;
+    Timer.Enabled := True;
+
+    if Assigned(UserOnChange) then
+      UserOnChange(Sender);
+  finally
+    FInChange := False;
+  end;
+end;
+
+procedure TRichMemoUndoTracker.HandleSelectionChange(Sender: TObject);
+begin
+  if Suppress then Exit;
+  if Timer.Enabled then Exit;
+  GetCaretState(Memo, Baseline.SelStart, Baseline.SelLength);
+
+  if Assigned(UserOnSelectionChange) then
+    UserOnSelectionChange(Sender);
+end;
+
+procedure TRichMemoUndoTracker.HandleTimer(Sender: TObject);
+var
+  Snap: TRichMemoSnapshot;
+begin
+  Timer.Enabled := False;
+  if Suppress then Exit;
+  if FInUndoRedo then Exit;
+
+  Snap := BuildSnapshot;
+  if Snap.Kind = skNone then
+  begin
+    // No user change was detected. If service formatting marked the RTF
+    // baseline as stale, refresh it now during idle time so subsequent user
+    // actions are diffed against the current document state.
+    if FBaselineStale then
+      CaptureBaseline;
+    Exit;
+  end;
+
+  Snap.SelStart := Baseline.SelStart;
+  Snap.SelLength := Baseline.SelLength;
+
+  PushSnapshot(UndoStack, Snap, MaxUndoSnapshots);
+  SetLength(RedoStack, 0);
+  CaptureBaseline;
+end;
+
+procedure TRichMemoHelper.EnableUndo;
+var
+  T: TRichMemoUndoTracker;
+begin
+  if Assigned(FindTracker(Self)) then Exit;
+  T := TRichMemoUndoTracker.Create(Self);
+  if not Assigned(GTrackers) then
+    GTrackers := TFPList.Create;
+  GTrackers.Add(T);
+  Self.OnChange := @T.HandleChange;
+  Self.OnSelectionChange := @T.HandleSelectionChange;
+end;
+
+procedure TRichMemoHelper.DisableUndo;
+var
+  T: TRichMemoUndoTracker;
+  Idx: integer;
+begin
+  T := FindTracker(Self);
+  if not Assigned(T) then Exit;
+  Idx := GTrackers.IndexOf(T);
+  if Idx >= 0 then GTrackers.Delete(Idx);
+  Self.OnChange := T.UserOnChange;
+  Self.OnSelectionChange := T.UserOnSelectionChange;
+  T.Free;
+end;
+
+function TRichMemoHelper.IsUndoEnabled: boolean;
+begin
+  Result := Assigned(FindTracker(Self));
+end;
+
+procedure TRichMemoHelper.BeginUndoBatch;
+var
+  T: TRichMemoUndoTracker;
+begin
+  T := FindTracker(Self);
+  if Assigned(T) then T.BeginBatch;
+end;
+
+procedure TRichMemoHelper.EndUndoBatch;
+var
+  T: TRichMemoUndoTracker;
+begin
+  T := FindTracker(Self);
+  if Assigned(T) then T.EndBatch;
+end;
+
+procedure TRichMemoHelper.PushUndoSnapshot;
+var
+  T: TRichMemoUndoTracker;
+begin
+  T := FindTracker(Self);
+  if not Assigned(T) then Exit;
+  T.Timer.Enabled := False;
+  T.CommitPendingChange;
+end;
+
+procedure TRichMemoHelper.UndoEx;
+var
+  T: TRichMemoUndoTracker;
+  Snap: TRichMemoSnapshot;
+  RedoSnap: TRichMemoSnapshot;
+begin
+  T := FindTracker(Self);
+  if not Assigned(T) then
+  begin
+    {$IFDEF WINDOWS}
+    SendMessage(Self.Handle, EM_UNDO, 0, 0);
+    {$ENDIF}
+    Exit;
+  end;
+
+  if T.FInUndoRedo then Exit;
+  T.FInUndoRedo := True;
+  T.BeginBatch;
+  try
+    T.Timer.Enabled := False;
+    T.CommitPendingChange;
+
+    if not PopSnapshot(T.UndoStack, Snap) then Exit;
+
+    case Snap.Kind of
+      skText:
+      begin
+        RedoSnap := Snap;
+        RedoSnap.OldTailChars := Snap.NewTailChars;
+        RedoSnap.NewTailChars := Snap.OldTailChars;
+        RedoSnap.OldTail := Snap.NewTail;
+        RedoSnap.NewTail := Snap.OldTail;
+        RedoSnap.SelStart := Snap.SelStart + Snap.OldTailChars;
+        RedoSnap.SelLength := 0;
+      end;
+      skRtf:
+      begin
+        RedoSnap.Kind := skRtf;
+        RedoSnap.Rtf := Self.Rtf;
+        GetCaretState(Self, RedoSnap.SelStart, RedoSnap.SelLength);
+      end;
+    end;
+    SetLength(T.RedoStack, Length(T.RedoStack) + 1);
+    T.RedoStack[High(T.RedoStack)] := RedoSnap;
+
+    T.Suppress := True;
+    try
+      T.ApplyUndo(Snap);
+    finally
+      T.Suppress := False;
+    end;
+    T.CaptureBaseline;
+  finally
+    T.EndBatch;
+    T.FInUndoRedo := False;
+  end;
+end;
+
+procedure TRichMemoHelper.RedoEx;
+var
+  T: TRichMemoUndoTracker;
+  Snap: TRichMemoSnapshot;
+  UndoSnap: TRichMemoSnapshot;
+begin
+  T := FindTracker(Self);
+  if not Assigned(T) then
+  begin
+    {$IFDEF WINDOWS}
+    //SendMessage(Self.Handle, RM_EM_REDO, 0, 0);
+    {$ENDIF}
+    Exit;
+  end;
+
+  if T.FInUndoRedo then Exit;
+  T.FInUndoRedo := True;
+  T.BeginBatch;
+  try
+    T.Timer.Enabled := False;
+    if not PopSnapshot(T.RedoStack, Snap) then Exit;
+
+    case Snap.Kind of
+      skText:
+      begin
+        UndoSnap := Snap;
+        UndoSnap.OldTailChars := Snap.NewTailChars;
+        UndoSnap.NewTailChars := Snap.OldTailChars;
+        UndoSnap.OldTail := Snap.NewTail;
+        UndoSnap.NewTail := Snap.OldTail;
+        UndoSnap.SelStart := Snap.SelStart + Snap.OldTailChars;
+        UndoSnap.SelLength := 0;
+      end;
+      skRtf:
+      begin
+        UndoSnap.Kind := skRtf;
+        UndoSnap.Rtf := Self.Rtf;
+        GetCaretState(Self, UndoSnap.SelStart, UndoSnap.SelLength);
+      end;
+    end;
+    SetLength(T.UndoStack, Length(T.UndoStack) + 1);
+    T.UndoStack[High(T.UndoStack)] := UndoSnap;
+
+    T.Suppress := True;
+    try
+      T.ApplyRedo(Snap);
+    finally
+      T.Suppress := False;
+    end;
+    T.CaptureBaseline;
+  finally
+    T.EndBatch;
+    T.FInUndoRedo := False;
+  end;
+end;
+
+function TRichMemoHelper.CanUndo: boolean;
+var
+  T: TRichMemoUndoTracker;
+begin
+  T := FindTracker(Self);
+  if not Assigned(T) then
+  begin
+    {$IFDEF WINDOWS}
+    Result := SendMessage(Self.Handle, EM_CANUNDO, 0, 0) <> 0;
+    {$ELSE}
+    Result := False;
+    {$ENDIF}
+    Exit;
+  end;
+  Result := Length(T.UndoStack) > 0;
+end;
+
+function TRichMemoHelper.CanRedo: boolean;
+var
+  T: TRichMemoUndoTracker;
+begin
+  T := FindTracker(Self);
+  if not Assigned(T) then
+  begin
+    {$IFDEF WINDOWS}
+    //Result := SendMessage(Self.Handle, RM_EM_CANREDO, 0, 0) <> 0;
+    {$ELSE}
+    Result := False;
+    {$ENDIF}
+    Exit;
+  end;
+  Result := Length(T.RedoStack) > 0;
+end;
+
+procedure TRichMemoHelper.ClearUndoHistory;
+var
+  T: TRichMemoUndoTracker;
+begin
+  T := FindTracker(Self);
+  if not Assigned(T) then
+  begin
+    {$IFDEF WINDOWS}
+    SendMessage(Self.Handle, EM_EMPTYUNDOBUFFER, 0, 0);
+    {$ENDIF}
+    Exit;
+  end;
+  SetLength(T.UndoStack, 0);
+  SetLength(T.RedoStack, 0);
+  T.CaptureBaseline;
+end;
 
 function TRichMemoHelper.PasteFromClipboardEx(AUseHtmlFormat: boolean = True): boolean;
 var
@@ -203,8 +981,20 @@ begin
   else
     HtmlText := Clipboard.AsText;
 
-  if HtmlText = '' then
+  if HtmlText = '' then Exit;
+
+  if not AUseHtmlFormat then
+  begin
+    BeginUndoBatch;
+    try
+      Self.SelText := HtmlText;
+    finally
+      EndUndoBatch;
+    end;
+    PushUndoSnapshot;
+    Result := True;
     Exit;
+  end;
 
   {$IFDEF WINDOWS}
   RtfText := ConvertHtmlToRtf(HtmlText, Self.GetActualFontSize);
@@ -230,8 +1020,14 @@ begin
       Clipboard.Close;
     end;
 
-    // Standard paste inserts at the current cursor position
-    Self.PasteFromClipboard;
+    BeginUndoBatch;
+    try
+      // Standard paste inserts at the current cursor position
+      Self.PasteFromClipboard;
+    finally
+      EndUndoBatch;
+    end;
+    PushUndoSnapshot;
     Result := True;
   finally
     // Restore the original clipboard content
@@ -292,7 +1088,7 @@ begin
       try
         ms.WriteBuffer(PlainText[1], Length(PlainText));
         ms.Position := 0;
-        Clipboard.AddFormat(CF_TEXT, ms);
+        Clipboard.AddFormat(CF_UNICODETEXT, ms);
       finally
         ms.Free;
       end;
@@ -319,6 +1115,12 @@ begin
 
   Result := True;
   {$ENDIF}
+
+  {$IFDEF LCLGTK2}
+  if Self.SelLength = 0 then Exit;
+  EmitGtkClipboardSignal(Self, 'copy-clipboard');
+  Result := True;
+  {$ENDIF}
 end;
 
 function TRichMemoHelper.CutToClipboardEx: boolean;
@@ -330,9 +1132,26 @@ begin
 
   // Copy selected content to clipboard
   if not Self.CopyToClipboardEx then Exit;
+  BeginUndoBatch;
+  try
+    // Delete the selected text
+    Self.SelText := '';
+  finally
+    EndUndoBatch;
+  end;
+  PushUndoSnapshot;
+  Result := True;
+  {$ENDIF}
 
-  // Delete the selected text
-  Self.SelText := '';
+  {$IFDEF LCLGTK2}
+  if Self.SelLength = 0 then Exit;
+  BeginUndoBatch;
+  try
+    EmitGtkClipboardSignal(Self, 'cut-clipboard');
+  finally
+    EndUndoBatch;
+  end;
+  PushUndoSnapshot;
   Result := True;
   {$ENDIF}
 end;
@@ -351,9 +1170,13 @@ begin
 
   // Put the cleaned text into the clipboard.
   Clipboard.AsText := SelectedText;
-
-  // Now delete the selected text from the RichMemo.
-  Self.ClearSelection;
+  BeginUndoBatch;
+  try
+    Self.ClearSelection;
+  finally
+    EndUndoBatch;
+  end;
+  PushUndoSnapshot;
 end;
 
 procedure TRichMemoHelper.PasteWithLineEnding;
@@ -372,8 +1195,13 @@ begin
     s := StringReplace(s, #13#10, #10, [rfReplaceAll]); // Windows CRLF -> LF
     s := StringReplace(s, #13, #10, [rfReplaceAll]);   // Macintosh CR -> LF
     s := StringReplace(s, #10, LineEnding, [rfReplaceAll]); // LF -> platform line ending
-
-    Self.SelText := s;
+    BeginUndoBatch;
+    try
+      Self.SelText := s;
+    finally
+      EndUndoBatch;
+    end;
+    PushUndoSnapshot;
   end;
 end;
 
@@ -388,49 +1216,55 @@ var
   MarkerPosText: integer;
   MarkerCharPos: integer;
 begin
-  if ARtf = '' then
-    Exit;
+  if ARtf = '' then Exit;
 
-  OriginalRtf := Self.Rtf;
+  BeginUndoBatch;
+  try
+    OriginalRtf := Self.Rtf;
 
-  // Replace current selection with the marker.
-  Self.SelText := Marker;
+    // Replace current selection with the marker.
+    Self.SelText := Marker;
 
-  // Get the RTF containing the marker.
-  FullRtf := Self.Rtf;
+    // Get the RTF containing the marker.
+    FullRtf := Self.Rtf;
 
-  MarkerPosRtf := Pos(Marker, FullRtf);
-  if MarkerPosRtf = 0 then
-  begin
-    Self.Rtf := OriginalRtf;
-    Exit;
+    MarkerPosRtf := Pos(Marker, FullRtf);
+    if MarkerPosRtf = 0 then
+    begin
+      Self.Rtf := OriginalRtf;
+      Exit;
+    end;
+
+    // Replace the marker with the RTF fragment followed by the marker.
+    Before := Copy(FullRtf, 1, MarkerPosRtf - 1);
+    After := Copy(FullRtf, MarkerPosRtf + Length(Marker), MaxInt);
+
+    Self.Rtf := Before + ARtf + Marker + After;
+
+    // Find the marker in the resulting plain text.
+    MarkerPosText := Pos(Marker, Self.Text);
+    if MarkerPosText = 0 then
+    begin
+      Self.Rtf := OriginalRtf;
+      Exit;
+    end;
+
+    // Pos() returns a UTF-8 byte position.
+    // RichMemo.SelStart expects a character position.
+    MarkerCharPos := UTF8Length(Copy(Self.Text, 1, MarkerPosText - 1));
+
+    // Delete the marker.
+    Self.SelStart := MarkerCharPos;
+    Self.SelLength := UTF8Length(Marker);
+    Self.SelText := '';
+
+    // Cursor is now exactly where the marker was.
+    Self.SelLength := 0;
+  finally
+    EndUndoBatch;
   end;
 
-  // Replace the marker with the RTF fragment followed by the marker.
-  Before := Copy(FullRtf, 1, MarkerPosRtf - 1);
-  After := Copy(FullRtf, MarkerPosRtf + Length(Marker), MaxInt);
-
-  Self.Rtf := Before + ARtf + Marker + After;
-
-  // Find the marker in the resulting plain text.
-  MarkerPosText := Pos(Marker, Self.Text);
-  if MarkerPosText = 0 then
-  begin
-    Self.Rtf := OriginalRtf;
-    Exit;
-  end;
-
-  // Pos() returns a UTF-8 byte position.
-  // RichMemo.SelStart expects a character position.
-  MarkerCharPos := UTF8Length(Copy(Self.Text, 1, MarkerPosText - 1));
-
-  // Delete the marker.
-  Self.SelStart := MarkerCharPos;
-  Self.SelLength := UTF8Length(Marker);
-  Self.SelText := '';
-
-  // Cursor is now exactly where the marker was.
-  Self.SelLength := 0;
+  PushUndoSnapshot;
 end;
 
 function TRichMemoHelper.HasRichFormatting: boolean;
@@ -775,13 +1609,17 @@ begin
   SendMessage(Self.Handle, EM_SETPARAFORMAT, 0, LPARAM(@ParaFormat2));
   {$HINTS ON}
   {$ELSE}
-  ParaMetric := Default(TParaMetric);
-  InitParaMetric(ParaMetric);
-  ParaMetric.LineSpacing := DefLineSpacing;
-  ParaMetric.SpaceBefore := 0;
-  ParaMetric.SpaceAfter := 0;
-
-  Self.SetParaMetric(0, Self.GetTextLen, ParaMetric);
+  BeginUndoBatch;
+  try
+    ParaMetric := Default(TParaMetric);
+    InitParaMetric(ParaMetric);
+    ParaMetric.LineSpacing := DefLineSpacing;
+    ParaMetric.SpaceBefore := 0;
+    ParaMetric.SpaceAfter := 0;
+    Self.SetParaMetric(0, Self.GetTextLen, ParaMetric);
+  finally
+    EndUndoBatch;
+  end;
   {$ENDIF}
 end;
 
@@ -906,7 +1744,19 @@ var
   NameWide: WideString;
   NamePtr: PWideChar;
 {$ENDIF}
+var
+  T: TRichMemoUndoTracker;
 begin
+  T := FindTracker(Self);
+  if Assigned(T) then
+  begin
+    // Flush any change still waiting in the debounce timer before
+    // suppression, otherwise ResumeUndo would silently swallow it when it
+    // captures a new baseline.
+    T.Timer.Enabled := False;
+    T.CommitPendingChange;
+    T.Suppress := True;
+  end;
   {$IFDEF WINDOWS}
   RichEditOle := nil;
   DispParams:=Default(TDispParams);
@@ -943,6 +1793,8 @@ var
   NameWide: WideString;
   NamePtr: PWideChar;
 {$ENDIF}
+var
+  T: TRichMemoUndoTracker;
 begin
   {$IFDEF WINDOWS}
   RichEditOle := nil;
@@ -967,6 +1819,17 @@ begin
   Doc.Invoke(DispID, GUID_NULL, LOCALE_SYSTEM_DEFAULT, DISPATCH_METHOD,
     DispParams, nil, nil, nil);
   {$ENDIF}
+  T := FindTracker(Self);
+  if Assigned(T) then
+  begin
+    T.Suppress := False;
+    // Do not reserialize the RTF baseline here: this method runs during
+    // active spell-check processing, and a full RTF snapshot on a large
+    // document can stall the UI for seconds. Mark the baseline as stale
+    // instead; the debounce timer refreshes it once the user stops
+    // interacting.
+    T.MarkBaselineStale;
+  end;
 end;
 
 procedure TRichMemoHelper.SetLeftIndent(AIndentPixels: integer = 3);
@@ -1158,20 +2021,23 @@ var
   TextLen: integer;
 begin
   if Self.Text = '' then Exit;
-
-  // Calculate text length in UTF-16 code units because the control uses them for SelLength
   TextLen := Length(UTF8ToUTF16(Self.Text));
+  BeginUndoBatch;
+  try
+    // Select all text
+    Self.SelStart := 0;
+    Self.SelLength := TextLen;
 
-  // Select all text
-  Self.SelStart := 0;
-  Self.SelLength := TextLen;
+    // Replacing selection with empty string creates an undo point
+    Self.SelText := '';
 
-  // Replacing selection with empty string creates an undo point
-  Self.SelText := '';
-
-  // Move cursor to the beginning
-  Self.SelStart := 0;
-  Self.SelLength := 0;
+    // Move cursor to the beginning
+    Self.SelStart := 0;
+    Self.SelLength := 0;
+  finally
+    EndUndoBatch;
+  end;
+  PushUndoSnapshot;
 end;
 
 procedure TRichMemoHelper.UpdateState(AIndentPixels: integer = 3; AResetParaSpacing: boolean = False);
@@ -1183,5 +2049,16 @@ begin
   if AResetParaSpacing then
     Self.ResetParaSpacing;
 end;
+
+finalization
+  if Assigned(GTrackers) then
+  begin
+    while GTrackers.Count > 0 do
+    begin
+      TRichMemoUndoTracker(GTrackers[0]).Free;
+      GTrackers.Delete(0);
+    end;
+    FreeAndNil(GTrackers);
+  end;
 
 end.

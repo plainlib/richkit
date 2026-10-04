@@ -11,11 +11,7 @@ unit RichSpellChecker;
 interface
 
 uses
-  Classes, SysUtils, Menus, Graphics, Types, ExtCtrls,
-  {$IFDEF WINDOWS}
-  RichMemoHelper,
-  {$ENDIF}
-  RichMemo;
+  Classes, SysUtils, Menus, Graphics, Types, ExtCtrls, RichMemo, RichMemoHelper;
 
 type
   TSpellCheckOption = (scoSpelling, scoComprehensiveSpelling);
@@ -307,24 +303,31 @@ begin
   // GtkBeginBatch/GtkEndBatch group all formatting changes into a single
   // user action and freeze child-notify signals, so the widget is redrawn
   // once at the end instead of after every error.
-  GtkBeginBatch(ARichMemo);
+  // Spell-check underlines are service formatting and must not be recorded
+  // in the undo tracker, so suppress undo for the whole batch.
+  ARichMemo.SuspendUndo;
   try
-    ARichMemo.Lines.BeginUpdate;
+    GtkBeginBatch(ARichMemo);
     try
-      for i := AStartIndex to AErrors.Count - 1 do
-        DrawSpellUnderline(ARichMemo,
-          PSpellError(AErrors[i])^.Offset,
-          PSpellError(AErrors[i])^.Length,
-          PSpellError(AErrors[i])^.Color);
+      ARichMemo.Lines.BeginUpdate;
+      try
+        for i := AStartIndex to AErrors.Count - 1 do
+          DrawSpellUnderline(ARichMemo,
+            PSpellError(AErrors[i])^.Offset,
+            PSpellError(AErrors[i])^.Length,
+            PSpellError(AErrors[i])^.Color);
+      finally
+        if ARichMemo.SelStart <> OldSelStart then
+          ARichMemo.SelStart := OldSelStart;
+        if ARichMemo.SelLength <> OldSelLength then
+          ARichMemo.SelLength := OldSelLength;
+        ARichMemo.Lines.EndUpdate;
+      end;
     finally
-      if ARichMemo.SelStart <> OldSelStart then
-        ARichMemo.SelStart := OldSelStart;
-      if ARichMemo.SelLength <> OldSelLength then
-        ARichMemo.SelLength := OldSelLength;
-      ARichMemo.Lines.EndUpdate;
+      GtkEndBatch(ARichMemo);
     end;
   finally
-    GtkEndBatch(ARichMemo);
+    ARichMemo.ResumeUndo;
   end;
   {$ENDIF}
 end;
@@ -478,32 +481,39 @@ begin
   // position stable while underlines are cleared and redrawn in background.
   // GtkBeginBatch/GtkEndBatch collapse the call into one user action, so the
   // widget is redrawn once instead of after each internal change.
+  // Clearing underlines is service formatting and must not be recorded in
+  // the undo tracker, so suppress undo for the whole operation.
   OldSelStart := ARichMemo.SelStart;
   OldSelLength := ARichMemo.SelLength;
 
-  GtkBeginBatch(ARichMemo);
+  ARichMemo.SuspendUndo;
   try
-    ARichMemo.Lines.BeginUpdate;
+    GtkBeginBatch(ARichMemo);
     try
-      ARichMemo.SetRangeParams(
-        0,
-        Length(ARichMemo.Text),
-        [tmm_Styles, tmm_Color],
-        '',
-        0,
-        clWindowText,
-        [],
-        [fsUnderline]
-        );
+      ARichMemo.Lines.BeginUpdate;
+      try
+        ARichMemo.SetRangeParams(
+          0,
+          Length(ARichMemo.Text),
+          [tmm_Styles, tmm_Color],
+          '',
+          0,
+          clWindowText,
+          [],
+          [fsUnderline]
+          );
+      finally
+        if ARichMemo.SelStart <> OldSelStart then
+          ARichMemo.SelStart := OldSelStart;
+        if ARichMemo.SelLength <> OldSelLength then
+          ARichMemo.SelLength := OldSelLength;
+        ARichMemo.Lines.EndUpdate;
+      end;
     finally
-      if ARichMemo.SelStart <> OldSelStart then
-        ARichMemo.SelStart := OldSelStart;
-      if ARichMemo.SelLength <> OldSelLength then
-        ARichMemo.SelLength := OldSelLength;
-      ARichMemo.Lines.EndUpdate;
+      GtkEndBatch(ARichMemo);
     end;
   finally
-    GtkEndBatch(ARichMemo);
+    ARichMemo.ResumeUndo;
   end;
   {$ENDIF}
 end;
@@ -1028,31 +1038,38 @@ begin
   // widget would scroll the caret back into view on every call.
   // GtkBeginBatch/GtkEndBatch keep the change and the surrounding selection
   // restore inside a single user action, so the widget redraws once.
+  // Removing a single underline is service formatting and must not be
+  // recorded in the undo tracker, so suppress undo for the operation.
   OldSelStart := FRichMemo.SelStart;
   OldSelLength := FRichMemo.SelLength;
-  GtkBeginBatch(FRichMemo);
+  FRichMemo.SuspendUndo;
   try
-    FRichMemo.Lines.BeginUpdate;
+    GtkBeginBatch(FRichMemo);
     try
-      FRichMemo.SetRangeParams(
-        AError^.Offset,
-        ANewLength,
-        [tmm_Styles, tmm_Color],
-        '',
-        0,
-        clWindowText,
-        [],
-        [fsUnderline]
-        );
+      FRichMemo.Lines.BeginUpdate;
+      try
+        FRichMemo.SetRangeParams(
+          AError^.Offset,
+          ANewLength,
+          [tmm_Styles, tmm_Color],
+          '',
+          0,
+          clWindowText,
+          [],
+          [fsUnderline]
+          );
+      finally
+        if FRichMemo.SelStart <> OldSelStart then
+          FRichMemo.SelStart := OldSelStart;
+        if FRichMemo.SelLength <> OldSelLength then
+          FRichMemo.SelLength := OldSelLength;
+        FRichMemo.Lines.EndUpdate;
+      end;
     finally
-      if FRichMemo.SelStart <> OldSelStart then
-        FRichMemo.SelStart := OldSelStart;
-      if FRichMemo.SelLength <> OldSelLength then
-        FRichMemo.SelLength := OldSelLength;
-      FRichMemo.Lines.EndUpdate;
+      GtkEndBatch(FRichMemo);
     end;
   finally
-    GtkEndBatch(FRichMemo);
+    FRichMemo.ResumeUndo;
   end;
   {$ENDIF}
 
