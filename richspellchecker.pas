@@ -237,11 +237,59 @@ begin
 end;
 {$IFEND}
 
+// Low level underline drawing used inside a batch. The caller owns the
+// undo suspension and the selection save/restore, so this helper does not
+// touch them. Used by DrawSpellErrorsBatch to avoid two redundant
+// SendMessage calls per error on Windows, which is the main speedup for
+// documents with thousands of underlines.
+procedure DrawSpellUnderlineFast(ARichMemo: TRichMemo; AOffset, ALength: integer; AColor: TColor);
+{$IFDEF WINDOWS}
+var
+  cf: CHARFORMAT2W;
+  cr: CHARRANGE;
+{$ENDIF}
+begin
+  if not Assigned(ARichMemo) then
+    Exit;
+
+  {$IFDEF WINDOWS}
+  cr.cpMin := AOffset;
+  cr.cpMax := AOffset + ALength;
+  {$HINTS OFF}
+  SendMessage(ARichMemo.Handle, EM_EXSETSEL, 0, LPARAM(PtrInt(@cr)));
+  {$HINTS ON}
+
+  cf := Default(CHARFORMAT2W);
+  cf.cbSize := SizeOf(cf);
+  cf.dwMask := CFM_UNDERLINE or CFM_UNDERLINETYPE or CFM_UNDERLINECOLOR or CFM_COLOR;
+  cf.dwEffects := CFE_UNDERLINE;
+  cf.bUnderlineType := CFU_UNDERLINEWAVE;
+  cf.bUnderlineColor := MapColorToWinUnderline(AColor);
+  cf.crTextColor := GetSysColor(COLOR_WINDOWTEXT);
+
+  {$HINTS OFF}
+  SendMessage(ARichMemo.Handle, EM_SETCHARFORMAT, SCF_SELECTION, LPARAM(PtrInt(@cf)));
+  {$HINTS ON}
+  {$ELSE}
+  ARichMemo.SetRangeParams(
+    AOffset,
+    ALength,
+    [tmm_Styles, tmm_Color],
+    '',
+    0,
+    AColor,
+    [],
+    []
+    );
+  {$ENDIF}
+end;
+
 procedure DrawSpellErrorsBatch(ARichMemo: TRichMemo; AErrors: TList; AStartIndex: integer = 0);
 var
   i: integer;
   {$IFDEF WINDOWS}
   scrollPos: TPoint;
+  cr: CHARRANGE;
   {$ENDIF}
   OldSelStart, OldSelLength: integer;
 begin
@@ -269,22 +317,29 @@ begin
     SendMessage(ARichMemo.Handle, WM_SETREDRAW, 0, 0);
     try
       for i := AStartIndex to AErrors.Count - 1 do
-      begin
-        DrawSpellUnderline(ARichMemo,
+        DrawSpellUnderlineFast(ARichMemo,
           PSpellError(AErrors[i])^.Offset,
           PSpellError(AErrors[i])^.Length,
           PSpellError(AErrors[i])^.Color);
-      end;
     finally
-      // Restore caret position
-      ARichMemo.SelStart := OldSelStart;
-      ARichMemo.SelLength := OldSelLength;
+      // Restore the selection through EM_EXSETSEL directly, bypassing the
+      // LCL property setter. The setter performs extra work per call (cache
+      // updates and a possible scroll-into-view), which is wasteful when
+      // we only need to put the caret back where it was before the batch.
+      cr.cpMin := OldSelStart;
+      cr.cpMax := OldSelStart + OldSelLength;
+      {$HINTS OFF}
+      SendMessage(ARichMemo.Handle, EM_EXSETSEL, 0, LPARAM(PtrInt(@cr)));
+      {$HINTS ON}
       // Restore scroll position
       {$HINTS OFF}
       SendMessage(ARichMemo.Handle, EM_SETSCROLLPOS, 0, LPARAM(PtrInt(@scrollPos)));
       {$HINTS ON}
+      // WM_SETREDRAW with 1 already invalidates the whole control and
+      // schedules a repaint. An additional Invalidate just forces that
+      // repaint to run sooner, which tends to make incremental chunked
+      // checks feel heavier because the paint is not batched with others.
       SendMessage(ARichMemo.Handle, WM_SETREDRAW, 1, 0);
-      ARichMemo.Invalidate;
     end;
   finally
     ARichMemo.ResumeUndo;
@@ -312,7 +367,7 @@ begin
       ARichMemo.Lines.BeginUpdate;
       try
         for i := AStartIndex to AErrors.Count - 1 do
-          DrawSpellUnderline(ARichMemo,
+          DrawSpellUnderlineFast(ARichMemo,
             PSpellError(AErrors[i])^.Offset,
             PSpellError(AErrors[i])^.Length,
             PSpellError(AErrors[i])^.Color);
@@ -335,52 +390,30 @@ end;
 procedure DrawSpellUnderline(ARichMemo: TRichMemo; AOffset, ALength: integer; AColor: TColor);
 {$IFDEF WINDOWS}
 var
-  cf: CHARFORMAT2W;
-  cr: CHARRANGE;
+  OldSelStart, OldSelLength: integer;
 {$ENDIF}
 begin
-  {$IFDEF WINDOWS}
   if not Assigned(ARichMemo) then
     Exit;
 
+  {$IFDEF WINDOWS}
+  // Standalone calls must leave the memo in a clean state: hide the
+  // change from the undo tracker and restore the caret position after
+  // the underline has been applied, so no selection is left visible.
+  OldSelStart := ARichMemo.SelStart;
+  OldSelLength := ARichMemo.SelLength;
   ARichMemo.SuspendUndo;
   try
-    cr.cpMin := AOffset;
-    cr.cpMax := AOffset + ALength;
-    {$HINTS OFF}
-    SendMessage(ARichMemo.Handle, EM_EXSETSEL, 0, LPARAM(PtrInt(@cr)));
-    {$HINTS ON}
-
-    cf := Default(CHARFORMAT2W);
-    cf.cbSize := SizeOf(cf);
-    cf.dwMask := CFM_UNDERLINE or CFM_UNDERLINETYPE or CFM_UNDERLINECOLOR or CFM_COLOR;
-    cf.dwEffects := CFE_UNDERLINE;
-    cf.bUnderlineType := CFU_UNDERLINEWAVE;
-    cf.bUnderlineColor := MapColorToWinUnderline(AColor);
-    cf.crTextColor := GetSysColor(COLOR_WINDOWTEXT);
-
-    {$HINTS OFF}
-    SendMessage(ARichMemo.Handle, EM_SETCHARFORMAT, SCF_SELECTION, LPARAM(PtrInt(@cf)));
-    {$HINTS ON}
-
-    ARichMemo.SelLength := 0;
+    DrawSpellUnderlineFast(ARichMemo, AOffset, ALength, AColor);
+    ARichMemo.SelStart := OldSelStart;
+    ARichMemo.SelLength := OldSelLength;
   finally
     ARichMemo.ResumeUndo;
   end;
   {$ELSE}
-  if not Assigned(ARichMemo) then
-    Exit;
-
-  ARichMemo.SetRangeParams(
-    AOffset,
-    ALength,
-    [tmm_Styles, tmm_Color],
-    '',
-    0,
-    AColor,
-    [fsUnderline],
-    []
-    );
+  // On non Windows widget sets SetRangeParams does not leave a visible
+  // selection behind, so the fast path is safe to use directly.
+  DrawSpellUnderlineFast(ARichMemo, AOffset, ALength, AColor);
   {$ENDIF}
 end;
 
@@ -500,7 +533,7 @@ begin
           0,
           clWindowText,
           [],
-          [fsUnderline]
+          []
           );
       finally
         if ARichMemo.SelStart <> OldSelStart then
@@ -1056,7 +1089,7 @@ begin
           0,
           clWindowText,
           [],
-          [fsUnderline]
+          []
           );
       finally
         if FRichMemo.SelStart <> OldSelStart then
