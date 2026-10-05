@@ -3710,15 +3710,20 @@ begin
   for i := 0 to High(FWordCharsCodes) do
     if FWordCharsCodes[i] = CodePoint then Exit(True);
 
-  // Any character that has an ICONV mapping is also treated as part of a word
-  // Fast path: skip the loop when the first byte cannot match any ICONV source
-  if Length(FIconvFrom) > 0 then
+  // Any character that appears on either side of an ICONV rule is treated
+  // as part of a word. The source side keeps the original quote character
+  // inside a token, while the target side makes the converted form (for
+  // example the ASCII apostrophe that replaces a typographic quote) count
+  // as a word character as well
+  if (Length(FIconvFrom) > 0) or (Length(FIconvTo) > 0) then
   begin
-    if not FIconvFirstBytes[Ord(Ch^)] then Exit(False);
     SetLength(ChStr, CharLen);
     Move(Ch^, ChStr[1], CharLen);
-    for i := 0 to High(FIconvFrom) do
-      if FIconvFrom[i] = ChStr then Exit(True);
+    if FIconvFirstBytes[Ord(Ch^)] then
+      for i := 0 to High(FIconvFrom) do
+        if FIconvFrom[i] = ChStr then Exit(True);
+    for i := 0 to High(FIconvTo) do
+      if FIconvTo[i] = ChStr then Exit(True);
   end;
 
   Result := False;
@@ -4381,13 +4386,18 @@ begin
     begin
       Adjusted := AdjustCase(word, Weighted[i].S);
       Adjusted := ApplyOconv(Adjusted);
-      if UniqueResults.IndexOf(Adjusted) = -1 then
-      begin
-        UniqueResults.Add(Adjusted);
-        SetLength(Result, Length(Result) + 1);
-        Result[High(Result)] := Adjusted;
-        if Length(Result) >= 10 then Break;
-      end;
+      // A case-adjusted candidate can become invalid, for example when the
+      // dictionary only stores a capitalized proper noun such as Thursday.
+      // In that case the original dictionary form is kept so the user gets
+      // a usable correction instead of a lowercased misspelling
+      if not CheckWord(Adjusted) then
+        Adjusted := ApplyOconv(Weighted[i].S);
+      // Never return the misspelled word itself as a suggestion
+      if (Adjusted = CleanWord) or (UniqueResults.IndexOf(Adjusted) >= 0) then Continue;
+      UniqueResults.Add(Adjusted);
+      SetLength(Result, Length(Result) + 1);
+      Result[High(Result)] := Adjusted;
+      if Length(Result) >= 10 then Break;
     end;
   finally
     UniqueResults.Free;
