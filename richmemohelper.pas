@@ -828,10 +828,6 @@ begin
       skText:
       begin
         RedoSnap := Snap;
-        RedoSnap.OldTailChars := Snap.NewTailChars;
-        RedoSnap.NewTailChars := Snap.OldTailChars;
-        RedoSnap.OldTail := Snap.NewTail;
-        RedoSnap.NewTail := Snap.OldTail;
         RedoSnap.SelStart := Snap.SelStart + Snap.OldTailChars;
         RedoSnap.SelLength := 0;
       end;
@@ -884,10 +880,6 @@ begin
       skText:
       begin
         UndoSnap := Snap;
-        UndoSnap.OldTailChars := Snap.NewTailChars;
-        UndoSnap.NewTailChars := Snap.OldTailChars;
-        UndoSnap.OldTail := Snap.NewTail;
-        UndoSnap.NewTail := Snap.OldTail;
         UndoSnap.SelStart := Snap.SelStart + Snap.OldTailChars;
         UndoSnap.SelLength := 0;
       end;
