@@ -416,7 +416,7 @@ begin
 end;
 
 type
-  TRichMemoUndoTracker = class
+  TRichMemoUndoTracker = class(TComponent)
   public
     Memo: TRichMemo;
     Baseline: TRichMemoBaseline;
@@ -435,8 +435,9 @@ type
     HasPendingCaret: boolean;
     FBaselineStale: boolean;
     FTrackRtfChanges: boolean;
-    constructor Create(AMemo: TRichMemo);
+    constructor Create(AMemo: TRichMemo); reintroduce;
     destructor Destroy; override;
+    procedure Notification(AComponent: TComponent; Operation: TOperation); override;
     procedure BeginBatch;
     procedure EndBatch;
     procedure HandleChange(Sender: TObject);
@@ -467,8 +468,9 @@ end;
 
 constructor TRichMemoUndoTracker.Create(AMemo: TRichMemo);
 begin
-  inherited Create;
+  inherited Create(nil);
   Memo := AMemo;
+  AMemo.FreeNotification(Self);
   Suppress := False;
   FInChange := False;
   FInUndoRedo := False;
@@ -487,7 +489,7 @@ begin
   {$ENDIF}
   UserOnChange := AMemo.OnChange;
   UserOnSelectionChange := AMemo.OnSelectionChange;
-  Timer := TTimer.Create(AMemo);
+  Timer := TTimer.Create(nil);
   Timer.Interval := UndoDebounceMs;
   Timer.Enabled := False;
   Timer.OnTimer := @HandleTimer;
@@ -497,8 +499,26 @@ end;
 destructor TRichMemoUndoTracker.Destroy;
 begin
   FDestroyed := True;
-  Timer.Enabled := False;
+  if Assigned(Timer) then
+  begin
+    Timer.Enabled := False;
+    FreeAndNil(Timer);
+  end;
+  if Assigned(Memo) then
+    Memo.RemoveFreeNotification(Self);
   inherited Destroy;
+end;
+
+procedure TRichMemoUndoTracker.Notification(AComponent: TComponent; Operation: TOperation);
+begin
+  inherited Notification(AComponent, Operation);
+  if (Operation = opRemove) and (AComponent = Memo) then
+  begin
+    if Assigned(Timer) then
+      Timer.Enabled := False;
+    FDestroyed := True;
+    Memo := nil;
+  end;
 end;
 
 procedure TRichMemoUndoTracker.BeginBatch;
