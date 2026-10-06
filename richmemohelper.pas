@@ -914,7 +914,7 @@ begin
   if not Assigned(T) then
   begin
     {$IFDEF WINDOWS}
-    //SendMessage(Self.Handle, RM_EM_REDO, 0, 0);
+    SendMessage(Self.Handle, EM_REDO, 0, 0);
     {$ENDIF}
     Exit;
   end;
@@ -981,7 +981,7 @@ begin
   if not Assigned(T) then
   begin
     {$IFDEF WINDOWS}
-    //Result := SendMessage(Self.Handle, RM_EM_CANREDO, 0, 0) <> 0;
+    Result := SendMessage(Self.Handle, EM_CANREDO, 0, 0) <> 0;
     {$ELSE}
     Result := False;
     {$ENDIF}
