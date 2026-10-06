@@ -170,6 +170,8 @@ type
     FOnlyInCompoundFlag: integer;
     FKeepCaseFlag: integer;
     FForceUCaseFlag: integer;
+    FWarnFlag: integer;             // WARN flag or -1. Words with this flag are suspicious
+    FForbidWarn: boolean;           // When True, WARN words are treated as errors
     FCompoundFlag: integer;
     FCompoundBegin: integer;
     FCompoundMiddle: integer;
@@ -186,6 +188,9 @@ type
     FCompoundRuleFlagSet: array of boolean; // Flag ID is referenced by at least one COMPOUNDRULE
     FCheckCompoundDup: boolean;
     FCheckCompoundCase: boolean;
+    FCheckCompoundRep: boolean;     // CHECKCOMPOUNDREP. Reject compounds that become a word via REP
+    FCheckCompoundTriple: boolean;  // CHECKCOMPOUNDTRIPLE. Reject triple letter at the border
+    FSimplifiedTriple: boolean;     // SIMPLIFIEDTRIPLE. Accept simplified triple if the plain form is valid
     FCheckCompoundPatterns: array of TCompoundPattern;
     FREPFrom: array of string;
     FREPTo: array of string;
@@ -202,6 +207,15 @@ type
     FHasAffixContinuations: boolean;  // True when at least one affix rule carries continuation flags
     FZeroAffixEntries: TZeroAffixEntryArray;
     FFullStrip: boolean;              // FULLSTRIP directive present
+    // Suggestion tuning directives. Values are read from the AFF so the file
+    // parses without warnings. Only MAXCPDSUGS and ONLYMAXDIFF have a visible
+    // effect in the current implementation
+    FNoSplitSugs: boolean;            // NOSPLITSUGS. Do not suggest word splits
+    FMaxCpdSugs: integer;             // MAXCPDSUGS. 0 disables compound suggestions
+    FMaxNgramSugs: integer;           // MAXNGRAMSUGS. Limit for n-gram suggestions
+    FMaxDiff: integer;                // MAXDIFF. Maximum difference for n-gram suggestions
+    FOnlyMaxDiff: boolean;            // ONLYMAXDIFF. Show only suggestions within MAXDIFF
+    FSugsWithDots: boolean;           // SUGSWITHDOTS. Suggest trailing dot for abbreviations
 
     // Hash cache of CheckWord results per word (word -> boolean result)
     FCWCWords: array of string;
@@ -264,6 +278,7 @@ type
     function IsNoSuggestWord(const Flags: TIntegerArray): boolean;
     function IsForbiddenWord(const Flags: TIntegerArray): boolean;
     function MatchesCompoundPattern(const LeftPart, RightPart: string; const LeftFlags, RightFlags: TIntegerArray): boolean;
+    function RepCheckCompound(const LeftPart, RightPart: string): boolean;
     function TryGetPartFlags(const Part: string; RequiredFlag: integer; out OutFlags: TIntegerArray): boolean;
     function PartCanCompoundLeft(const Flags: TIntegerArray): boolean;
     function PartCanCompoundMiddle(const Flags: TIntegerArray): boolean;
@@ -546,6 +561,18 @@ begin
       (Ord((p + 3)^) and $3F);
 end;
 
+// Returns True when the given string starts with an uppercase letter. Used by
+// FORCEUCASE to reject lowercase-only forms of a capitalised dictionary entry
+function StartsWithUpper(const W: string): boolean;
+var
+  FirstChar: string;
+begin
+  Result := False;
+  if W = '' then Exit;
+  FirstChar := UTF8Copy(W, 1, 1);
+  Result := (FirstChar = UTF8UpperCase(FirstChar)) and (FirstChar <> UTF8LowerCase(FirstChar));
+end;
+
 function IsUTF8EncodingName(const Name: string): boolean;
 var
   n: string;
@@ -697,6 +724,32 @@ begin
       candidate := StringReplace(candidate, '_', ' ', [rfReplaceAll]);
       SetLength(Result, 1);
       Result[0] := candidate;
+    end;
+  end;
+end;
+
+// Returns True when the compound made of the two parts becomes a valid
+// dictionary word after applying a REP substitution. Used by CHECKCOMPOUNDREP
+// to reject compound typos that look like a valid two-word spelling
+function THunSpellChecker.RepCheckCompound(const LeftPart, RightPart: string): boolean;
+var
+  Combined, Replaced: string;
+  RepResults: TStringArray = nil;
+  Idx: integer = 0;
+  i: integer = 0;
+begin
+  Result := False;
+  if (Length(FREPFrom) = 0) or (LeftPart = '') or (RightPart = '') then Exit;
+  Combined := LeftPart + RightPart;
+  for i := 0 to High(FREPFrom) do
+  begin
+    RepResults := ApplyREP(Combined, FREPFrom[i], FREPTo[i]);
+    if Length(RepResults) > 0 then
+    begin
+      Replaced := RepResults[0];
+      if HashFind(Replaced, Idx) then
+        if not IsForbiddenWord(FWords[Idx].Flags) then
+          Exit(True);
     end;
   end;
 end;
@@ -1252,6 +1305,8 @@ begin
   FOnlyInCompoundFlag := -1;
   FKeepCaseFlag := -1;
   FForceUCaseFlag := -1;
+  FWarnFlag := -1;
+  FForbidWarn := False;
   FCompoundFlag := -1;
   FCompoundBegin := -1;
   FCompoundMiddle := -1;
@@ -1268,8 +1323,18 @@ begin
 
   FCheckCompoundDup := False;
   FCheckCompoundCase := False;
+  FCheckCompoundRep := False;
+  FCheckCompoundTriple := False;
+  FSimplifiedTriple := False;
   SetLength(FCheckCompoundPatterns, 0);
   FFullStrip := False;
+
+  FNoSplitSugs := False;
+  FMaxCpdSugs := -1;
+  FMaxNgramSugs := -1;
+  FMaxDiff := 5;
+  FOnlyMaxDiff := False;
+  FSugsWithDots := False;
 
   FBreakPatterns := TStringList.Create;
   FSuggestCache := TStringList.Create;
@@ -1384,6 +1449,8 @@ begin
     FOnlyInCompoundFlag := -1;
     FKeepCaseFlag := -1;
     FForceUCaseFlag := -1;
+    FWarnFlag := -1;
+    FForbidWarn := False;
     FCompoundFlag := -1;
     FCompoundBegin := -1;
     FCompoundMiddle := -1;
@@ -1394,11 +1461,20 @@ begin
     FCompoundWordMax := 0;
     FCheckCompoundDup := False;
     FCheckCompoundCase := False;
+    FCheckCompoundRep := False;
+    FCheckCompoundTriple := False;
+    FSimplifiedTriple := False;
     SetLength(FCheckCompoundPatterns, 0);
     FHasAffixContinuations := False;
     FAFCount := 0;
     FTryChars := '';
     FFullStrip := False;
+    FNoSplitSugs := False;
+    FMaxCpdSugs := -1;
+    FMaxNgramSugs := -1;
+    FMaxDiff := 5;
+    FOnlyMaxDiff := False;
+    FSugsWithDots := False;
 
     FillDWord(FHashTable[0], FHashSize, $FFFFFFFF);
 
@@ -1456,6 +1532,8 @@ begin
     FOnlyInCompoundFlag := -1;
     FKeepCaseFlag := -1;
     FForceUCaseFlag := -1;
+    FWarnFlag := -1;
+    FForbidWarn := False;
     FCompoundFlag := -1;
     FCompoundBegin := -1;
     FCompoundMiddle := -1;
@@ -1466,11 +1544,20 @@ begin
     FCompoundWordMax := 0;
     FCheckCompoundDup := False;
     FCheckCompoundCase := False;
+    FCheckCompoundRep := False;
+    FCheckCompoundTriple := False;
+    FSimplifiedTriple := False;
     SetLength(FCheckCompoundPatterns, 0);
     FHasAffixContinuations := False;
     FAFCount := 0;
     FTryChars := '';
     FFullStrip := False;
+    FNoSplitSugs := False;
+    FMaxCpdSugs := -1;
+    FMaxNgramSugs := -1;
+    FMaxDiff := 5;
+    FOnlyMaxDiff := False;
+    FSugsWithDots := False;
 
     FillDWord(FHashTable[0], FHashSize, $FFFFFFFF);
 
@@ -1720,9 +1807,45 @@ begin
       begin
         FCheckCompoundCase := True;
       end
+      else if Parts[0] = 'CHECKCOMPOUNDREP' then
+      begin
+        FCheckCompoundRep := True;
+      end
+      else if Parts[0] = 'CHECKCOMPOUNDTRIPLE' then
+      begin
+        FCheckCompoundTriple := True;
+      end
+      else if Parts[0] = 'SIMPLIFIEDTRIPLE' then
+      begin
+        FSimplifiedTriple := True;
+      end
       else if Parts[0] = 'FULLSTRIP' then
       begin
         FFullStrip := True;
+      end
+      else if Parts[0] = 'NOSPLITSUGS' then
+      begin
+        FNoSplitSugs := True;
+      end
+      else if Parts[0] = 'MAXCPDSUGS' then
+      begin
+        if Parts.Count >= 2 then FMaxCpdSugs := StrToIntDef(Parts[1], 0);
+      end
+      else if Parts[0] = 'MAXNGRAMSUGS' then
+      begin
+        if Parts.Count >= 2 then FMaxNgramSugs := StrToIntDef(Parts[1], 10);
+      end
+      else if Parts[0] = 'MAXDIFF' then
+      begin
+        if Parts.Count >= 2 then FMaxDiff := StrToIntDef(Parts[1], 5);
+      end
+      else if Parts[0] = 'ONLYMAXDIFF' then
+      begin
+        FOnlyMaxDiff := True;
+      end
+      else if Parts[0] = 'SUGSWITHDOTS' then
+      begin
+        FSugsWithDots := True;
       end
       else if Parts[0] = 'CHECKCOMPOUNDPATTERN' then
       begin
@@ -1958,6 +2081,14 @@ begin
       begin
         if Parts.Count >= 2 then FForceUCaseFlag := InternFlag(Parts[1]);
       end
+      else if Parts[0] = 'WARN' then
+      begin
+        if Parts.Count >= 2 then FWarnFlag := InternFlag(Parts[1]);
+      end
+      else if Parts[0] = 'FORBIDWARN' then
+      begin
+        FForbidWarn := True;
+      end
       else if Parts[0] = 'IGNORE' then
       begin
         IgnoreStr := '';
@@ -2075,11 +2206,12 @@ var
   SlashPos: integer = 0;
   FlagsArr: TIntegerArray = nil;
   i: integer = 0;
+  j: integer = 0;
+  PrefixLen: integer = 0;
   ExpectedWords: integer = 0;
   AliasNum: integer = 0;
   TabPos: integer = 0;
   SpacePos: integer = 0;
-  RestStr: string = '';
 begin
   Lines := TStringList.Create;
   try
@@ -2114,20 +2246,26 @@ begin
       if Line = '' then Continue;
       if (Length(Line) > 0) and (Line[1] = '#') then Continue;
 
-      // Strip morphological data after a tab or a space followed by a known
-      // morphological prefix. Stavekontrolden separates the word from its
-      // morphology with a space (for example "dem st:De"), so a bare tab
-      // check is not enough. Phrases such as "a c." stay untouched because
-      // the text after the space is not a morphology prefix
+      // Strip morphological data after a tab or after a space followed by a
+      // short lowercase prefix such as st:, al:, ph: or ds:. Phrases such as
+      // "a c." stay untouched because the text after the space does not look
+      // like a morphological marker
       TabPos := Pos(#9, Line);
       if TabPos = 0 then
       begin
         SpacePos := Pos(' ', Line);
         while SpacePos > 0 do
         begin
-          RestStr := Copy(Line, SpacePos + 1, 3);
-          if (RestStr = 'st:') or (RestStr = 'al:') or (RestStr = 'ph:') or (RestStr = 'ip:') or
-            (RestStr = 'ds:') or (RestStr = 'pa:') or (RestStr = 'sp:') or (RestStr = 'po:') or (RestStr = 'is:') then
+          // A morphology prefix is one to four lowercase ASCII letters
+          // followed by a colon
+          PrefixLen := 0;
+          j := SpacePos + 1;
+          while (j <= Length(Line)) and (PrefixLen < 4) and (Line[j] in ['a'..'z']) do
+          begin
+            Inc(j);
+            Inc(PrefixLen);
+          end;
+          if (PrefixLen > 0) and (j <= Length(Line)) and (Line[j] = ':') then
           begin
             TabPos := SpacePos;
             Break;
@@ -2561,6 +2699,15 @@ begin
       Inc(Positions[FirstByte]);
     end;
   end;
+
+  // Mark every flag that appears in a COMPOUNDRULE atom so that
+  // CollectCompoundFlags works when the AFF was loaded through LoadAFF
+  // without going through LoadFromStream
+  SetLength(FCompoundRuleFlagSet, FFlagCount);
+  for i := 0 to High(FCompoundRuleList) do
+    for r := 0 to High(FCompoundRuleList[i].Atoms) do
+      if (FCompoundRuleList[i].Atoms[r].FlagId >= 0) and (FCompoundRuleList[i].Atoms[r].FlagId < FFlagCount) then
+        FCompoundRuleFlagSet[FCompoundRuleList[i].Atoms[r].FlagId] := True;
 end;
 
 // ---------------------------------------------------------------------------------
@@ -2829,6 +2976,9 @@ begin
       end;
 
       if not ByteEndsWith(FSR.Add, W) then Continue;
+      // Without FULLSTRIP the add cannot consume the whole surface form,
+      // so at least one character of the original stem must remain
+      if (not FFullStrip) and (Length(W) <= Length(FSR.Add)) then Continue;
       Prev := Copy(W, 1, Length(W) - Length(FSR.Add));
       if FSR.Strip <> '' then Prev := Prev + FSR.Strip;
       if not MatchesCondition(FSR.Condition, FSR.WideCondition, Prev, False) then Continue;
@@ -2902,6 +3052,8 @@ begin
       end;
 
       if not ByteStartsWith(FPR.Add, W) then Continue;
+      // Same FULLSTRIP restriction as for suffixes, mirrored to prefixes
+      if (not FFullStrip) and (Length(W) <= Length(FPR.Add)) then Continue;
       Prev := Copy(W, Length(FPR.Add) + 1, MaxInt);
       if FPR.Strip <> '' then Prev := FPR.Strip + Prev;
       if not MatchesCondition(FPR.Condition, FPR.WideCondition, Prev, True) then Continue;
@@ -3262,6 +3414,9 @@ var
   LastLeft: string;
   FirstRight: string;
   LeftFlag: integer = -1;
+  ChA, ChB, ChC: string;
+  Simplified: string;
+  SIdx: integer = 0;
 begin
   Result := False;
   if word = '' then Exit;
@@ -3298,6 +3453,42 @@ begin
       if (FirstRight = UTF8UpperCase(FirstRight)) and (FirstRight <> UTF8LowerCase(FirstRight)) then
         Continue;
     end;
+
+    // CHECKCOMPOUNDTRIPLE: a border where the last two letters of the left
+    // part and the first letter of the right part (or vice versa) are the
+    // same is rejected. With SIMPLIFIEDTRIPLE the simplified form is
+    // allowed when it exists as a plain dictionary word
+    if FCheckCompoundTriple then
+    begin
+      if (UTF8Length(leftPart) >= 2) and (UTF8Length(rightPart) >= 1) then
+      begin
+        ChA := UTF8Copy(leftPart, UTF8Length(leftPart) - 1, 1);
+        ChB := UTF8Copy(leftPart, UTF8Length(leftPart), 1);
+        ChC := UTF8Copy(rightPart, 1, 1);
+        if (ChA = ChB) and (ChB = ChC) then
+        begin
+          if not FSimplifiedTriple then Continue;
+          Simplified := leftPart + UTF8Copy(rightPart, 2, MaxInt);
+          if not HashFind(Simplified, SIdx) then Continue;
+        end;
+      end;
+      if (UTF8Length(leftPart) >= 1) and (UTF8Length(rightPart) >= 2) then
+      begin
+        ChA := UTF8Copy(leftPart, UTF8Length(leftPart), 1);
+        ChB := UTF8Copy(rightPart, 1, 1);
+        ChC := UTF8Copy(rightPart, 2, 1);
+        if (ChA = ChB) and (ChB = ChC) then
+        begin
+          if not FSimplifiedTriple then Continue;
+          Simplified := UTF8Copy(leftPart, 1, UTF8Length(leftPart) - 1) + rightPart;
+          if not HashFind(Simplified, SIdx) then Continue;
+        end;
+      end;
+    end;
+
+    // CHECKCOMPOUNDREP: a border whose transformation by a REP rule yields
+    // a valid dictionary word is a likely typo, so the compound is rejected
+    if FCheckCompoundRep and RepCheckCompound(leftPart, rightPart) then Continue;
 
     // Left part: dictionary entry or suffix-derived form
     if depth = 0 then
@@ -3544,6 +3735,8 @@ var
   Flags: TIntegerArray;
   DerivedFlags: TIntegerArray = nil;
   KeepCase: boolean;
+  ForceUCaseOk: boolean;
+  WarnOk: boolean;
 begin
   if word = '' then Exit(False);
   // A word made of digits only is always considered valid
@@ -3559,7 +3752,12 @@ begin
   if HashFind(word, idx) then
   begin
     Flags := FWords[idx].Flags;
-    if not IsForbiddenWord(Flags) then
+    // A FORCEUCASE entry is only valid when the surface form starts with an
+    // uppercase letter, otherwise the lowercase form would be wrongly accepted
+    ForceUCaseOk := (FForceUCaseFlag < 0) or (not HasFlag(Flags, FForceUCaseFlag)) or StartsWithUpper(word);
+    // A WARN entry is rejected when FORBIDWARN is set in the affix file
+    WarnOk := (not FForbidWarn) or (FWarnFlag < 0) or (not HasFlag(Flags, FWarnFlag));
+    if not IsForbiddenWord(Flags) and ForceUCaseOk and WarnOk then
     begin
       if not ((FOnlyInCompoundFlag >= 0) and HasFlag(Flags, FOnlyInCompoundFlag)) and not
         ((FNeedAffixFlag >= 0) and HasFlag(Flags, FNeedAffixFlag)) and not ((FPseudoRootFlag >= 0) and
@@ -3578,7 +3776,9 @@ begin
     begin
       Flags := FWords[idx].Flags;
       KeepCase := (FKeepCaseFlag >= 0) and HasFlag(Flags, FKeepCaseFlag);
-      if not KeepCase then
+      ForceUCaseOk := (FForceUCaseFlag < 0) or (not HasFlag(Flags, FForceUCaseFlag)) or StartsWithUpper(word);
+      WarnOk := (not FForbidWarn) or (FWarnFlag < 0) or (not HasFlag(Flags, FWarnFlag));
+      if not KeepCase and ForceUCaseOk and WarnOk then
       begin
         if not IsForbiddenWord(Flags) and not ((FOnlyInCompoundFlag >= 0) and HasFlag(Flags, FOnlyInCompoundFlag)) and
           not ((FNeedAffixFlag >= 0) and HasFlag(Flags, FNeedAffixFlag)) and not
@@ -3926,6 +4126,8 @@ begin
     begin
       RuleS := Group.Suffixes[r];
       if (RuleS.Strip <> '') and (not ByteEndsWith(RuleS.Strip, BaseWord)) then Continue;
+      // Without FULLSTRIP the strip cannot remove the entire base word
+      if (not FFullStrip) and (Length(BaseWord) <= Length(RuleS.Strip)) then Continue;
       if not MatchesCondition(RuleS.Condition, RuleS.WideCondition, BaseWord, False) then Continue;
       Stripped := BaseWord;
       if RuleS.Strip <> '' then
@@ -3957,6 +4159,8 @@ begin
     begin
       RuleP := Group.Prefixes[r];
       if (RuleP.Strip <> '') and (not ByteStartsWith(RuleP.Strip, BaseWord)) then Continue;
+      // Same FULLSTRIP restriction as for suffixes, mirrored to prefixes
+      if (not FFullStrip) and (Length(BaseWord) <= Length(RuleP.Strip)) then Continue;
       if not MatchesCondition(RuleP.Condition, RuleP.WideCondition, BaseWord, True) then Continue;
       Stripped := BaseWord;
       if RuleP.Strip <> '' then
@@ -4348,6 +4552,7 @@ var
   CacheIdx: integer;
   UniqueResults: TStringList;
   Adjusted: string;
+  FoundIdx: integer = 0;
 begin
   Result := nil;
   CleanWord := ApplyIconv(word);
@@ -4384,7 +4589,14 @@ begin
     SetLength(Result, 0);
     for i := 0 to High(Weighted) do
     begin
+      // ONLYMAXDIFF rejects candidates whose edit distance exceeds MAXDIFF
+      if FOnlyMaxDiff and (FMaxDiff >= 0) and (Weighted[i].Dist > FMaxDiff) then Continue;
       Adjusted := AdjustCase(word, Weighted[i].S);
+      // A KEEPCASE dictionary entry must keep its own capitalization even
+      // when the input was lowercase, otherwise Thursday becomes thursday
+      if HashFind(Weighted[i].S, FoundIdx) then
+        if (FKeepCaseFlag >= 0) and HasFlag(FWords[FoundIdx].Flags, FKeepCaseFlag) then
+          Adjusted := Weighted[i].S;
       Adjusted := ApplyOconv(Adjusted);
       // A case-adjusted candidate can become invalid, for example when the
       // dictionary only stores a capitalized proper noun such as Thursday.
