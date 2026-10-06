@@ -252,40 +252,43 @@ type
     SelLength: integer;
   end;
 
-{$IFDEF LCLGTK2}
+  {$IFDEF LCLGTK2}
 
-  var
-    GCachedHandleValue: TLCLHandle = 0;
-    GCachedView: PGtkTextView = nil;
+// The GTK2 bindings shipped with FPC do not export this function, so
+// declare it directly from the GObject library. It is the only public way
+// to verify that a widget pointer really is an instance of a given GType
+function g_type_check_instance_is_a(Instance: PGTypeInstance; IfaceType: GType): gboolean;
+  cdecl; external gobjectlib name 'g_type_check_instance_is_a';
 
 function GetGtkTextViewFromMemo(AMemo: TCustomRichMemo): PGtkTextView;
 var
   W: PGtkWidget;
-  List: PGList;
-  H: TLCLHandle;
+  Child: PGtkWidget;
+  Depth: integer;
 begin
   Result := nil;
   if not AMemo.HandleAllocated then Exit;
 
-  // Cache the underlying PGtkTextView per handle: gtk_container_get_children
-  // allocates a GList on every call, and this helper is invoked on every
-  // caret move and every formatting operation, so the allocation becomes
-  // measurable on GTK.
-  H := TLCLHandle(AMemo.Handle);
-  if H = GCachedHandleValue then
-    Exit(GCachedView);
-
   {$HINTS OFF}
-  W := PGtkWidget(PtrUInt(H));
+  W := PGtkWidget(AMemo.Handle);
   {$HINTS ON}
   if not Assigned(W) then Exit;
-  List := gtk_container_get_children(PGtkContainer(W));
-  if not Assigned(List) then Exit;
-  Result := PGtkTextView(List^.data);
-  g_list_free(List);
 
-  GCachedHandleValue := H;
-  GCachedView := Result;
+  // The memo handle may be the text view itself, or a scrolled window
+  // whose child is the text view, optionally wrapped in a viewport.
+  // Walk down a few levels and pick the first widget whose GType really
+  // matches GtkTextView, so a wrong cast can never reach GTK
+  Child := W;
+  for Depth := 0 to 2 do
+  begin
+    if g_type_check_instance_is_a(PGTypeInstance(Child), gtk_text_view_get_type) then
+    begin
+      Result := PGtkTextView(Child);
+      Exit;
+    end;
+    Child := gtk_bin_get_child(PGtkBin(Child));
+    if not Assigned(Child) then Exit;
+  end;
 end;
 
 procedure EmitGtkClipboardSignal(AMemo: TCustomRichMemo; const ASignalName: string);
