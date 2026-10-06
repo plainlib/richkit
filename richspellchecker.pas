@@ -73,6 +73,10 @@ type
     procedure ReplaceError(AError: PSpellError; const ANewText: string; NewCaretPos: integer = -1);
     // Remove a single error from the list and clear its underline
     procedure RemoveError(AError: PSpellError; ANewLength: integer);
+    // Updates the suggestion list of an existing error that matches the
+    // given offset and length. Used by the two-phase check to attach
+    // suggestions after the underlines have already been drawn
+    procedure UpdateErrorSuggestions(AOffset, ALength: integer; const AReplacements: array of string);
     property OnSpellCheckNeeded: TNotifyEvent read FOnSpellCheckNeeded write FOnSpellCheckNeeded;
     property PopupMenu: TPopupMenu read FTargetPopupMenu write SetTargetPopupMenu;
     property SubMenu: boolean read FSubMenu write FSubMenu default False;
@@ -344,6 +348,7 @@ begin
       // repaint to run sooner, which tends to make incremental chunked
       // checks feel heavier because the paint is not batched with others.
       SendMessage(ARichMemo.Handle, WM_SETREDRAW, 1, 0);
+      ARichMemo.Invalidate;
     end;
   finally
     ARichMemo.ResumeUndo;
@@ -1114,6 +1119,24 @@ begin
   FErrors.Remove(AError);
   // Replacements is now a managed dynamic array, no manual Free needed
   Dispose(AError);
+end;
+
+procedure TRichSpellChecker.UpdateErrorSuggestions(AOffset, ALength: integer; const AReplacements: array of string);
+var
+  i, j: integer;
+  err: PSpellError;
+begin
+  for i := 0 to FErrors.Count - 1 do
+  begin
+    err := PSpellError(FErrors[i]);
+    if (err^.Offset = AOffset) and (err^.Length = ALength) then
+    begin
+      SetLength(err^.Replacements, Length(AReplacements));
+      for j := Low(AReplacements) to High(AReplacements) do
+        err^.Replacements[j] := AReplacements[j];
+      Exit;
+    end;
+  end;
 end;
 
 {%EndRegion}
