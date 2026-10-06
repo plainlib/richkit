@@ -896,6 +896,11 @@ begin
       T.Suppress := False;
     end;
     T.CaptureBaseline;
+
+    // Notify external listeners because the tracker suppresses the
+    // standard OnChange event while a snapshot is being applied
+    if Assigned(T.UserOnChange) then
+      T.UserOnChange(Self);
   finally
     T.EndBatch;
     T.FInUndoRedo := False;
@@ -950,6 +955,11 @@ begin
       T.Suppress := False;
     end;
     T.CaptureBaseline;
+
+    // Notify external listeners because the tracker suppresses the
+    // standard OnChange event while a snapshot is being applied
+    if Assigned(T.UserOnChange) then
+      T.UserOnChange(Self);
   finally
     T.EndBatch;
     T.FInUndoRedo := False;
