@@ -1561,6 +1561,10 @@ begin
   AText := StringReplace(AText, #11, #10, [rfReplaceAll]);
   AText := StringReplace(AText, #10, sLineBreak, [rfReplaceAll]);
 
+  {$IFDEF UNIX}
+  AText := StringReplace(AText, sLineBreak, sLineBreak + ' ', [rfReplaceAll]);
+  {$ENDIF}
+
   // Always add LineEnding
   AText := AText + LineEnding + ' ';
   //if (Length(AText) > 0) and (AText[Length(AText)] in [#10, #13]) then

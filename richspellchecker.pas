@@ -102,7 +102,7 @@ implementation
   uses Windows, LCLType, ComObj, Variants;
 {$ENDIF}
 {$IFDEF LCLGTK2}
-  uses gtk2, gdk2, glib2;
+  uses gtk2;
 {$ENDIF}
 {$IFDEF LCLGTK3}
   uses gtk3, gdk3, glib2;
@@ -207,7 +207,9 @@ var
 begin
   if not Assigned(ARichMemo) then
     Exit;
+  {$HINTS OFF}
   Widget := PGtkWidget(ARichMemo.Handle);
+  {$HINTS ON}
   if Widget = nil then
     Exit;
   gtk_widget_freeze_child_notify(Widget);
@@ -220,7 +222,9 @@ var
 begin
   if not Assigned(ARichMemo) then
     Exit;
+  {$HINTS OFF}
   Widget := PGtkWidget(ARichMemo.Handle);
+  {$HINTS ON}
   if Widget = nil then
     Exit;
   gtk_text_buffer_end_user_action(gtk_text_view_get_buffer(GTK_TEXT_VIEW(Widget)));
