@@ -158,6 +158,8 @@ type
     FIconvTo: array of string;
     // First bytes of every ICONV source pattern. Used to skip conversion when no rule can match
     FIconvFirstBytes: array[0..255] of boolean;
+    // First bytes of every ICONV target pattern. Used to skip the linear scan when no replacement can match
+    FIconvToFirstBytes: array[0..255] of boolean;
     FOCONVFrom: array of string;
     FOCONVTo: array of string;
     FWordCharsCodes: TCardinalArray;
@@ -828,65 +830,78 @@ end;
 
 function THunSpellChecker.ParseFlagString(const FlagStr: string): TIntegerArray;
 var
-  i, startPos: integer;
-  s: string;
-  FlagList: TStringList;
-  j, FlagId: integer;
+  i, startPos, FlagId: integer;
+  s, SingleFlag: string;
 begin
   Result := nil;
   if FlagStr = '' then Exit;
-  FlagList := TStringList.Create;
-  try
-    case FFlagMode of
-      'ASCII':
-        for j := 1 to Length(FlagStr) do
-          FlagList.Add(FlagStr[j]);
-      'UTF-8':
+  case FFlagMode of
+    'ASCII':
+      for i := 1 to Length(FlagStr) do
       begin
-        s := FlagStr;
-        while s <> '' do
+        FlagId := InternFlag(FlagStr[i]);
+        if FlagId >= 0 then
         begin
-          FlagList.Add(UTF8Copy(s, 1, 1));
-          UTF8Delete(s, 1, 1);
+          SetLength(Result, Length(Result) + 1);
+          Result[High(Result)] := FlagId;
         end;
       end;
-      'LONG':
-      begin
-        i := 1;
-        while i + 1 <= Length(FlagStr) do
-        begin
-          FlagList.Add(Copy(FlagStr, i, 2));
-          Inc(i, 2);
-        end;
-      end;
-      'NUM':
-      begin
-        i := 1;
-        while i <= Length(FlagStr) do
-        begin
-          while (i <= Length(FlagStr)) and (FlagStr[i] in [',', ' ', #9]) do Inc(i);
-          if i > Length(FlagStr) then Break;
-          startPos := i;
-          while (i <= Length(FlagStr)) and not (FlagStr[i] in [',', ' ', #9]) do Inc(i);
-          FlagList.Add(Copy(FlagStr, startPos, i - startPos));
-        end;
-      end;
-      else
-        for j := 1 to Length(FlagStr) do
-          FlagList.Add(FlagStr[j]);
-    end;
-
-    for j := 0 to FlagList.Count - 1 do
+    'UTF-8':
     begin
-      FlagId := InternFlag(FlagList[j]);
-      if FlagId >= 0 then
+      s := FlagStr;
+      while s <> '' do
       begin
-        SetLength(Result, Length(Result) + 1);
-        Result[High(Result)] := FlagId;
+        SingleFlag := UTF8Copy(s, 1, 1);
+        UTF8Delete(s, 1, 1);
+        FlagId := InternFlag(SingleFlag);
+        if FlagId >= 0 then
+        begin
+          SetLength(Result, Length(Result) + 1);
+          Result[High(Result)] := FlagId;
+        end;
       end;
     end;
-  finally
-    FlagList.Free;
+    'LONG':
+    begin
+      i := 1;
+      while i + 1 <= Length(FlagStr) do
+      begin
+        FlagId := InternFlag(Copy(FlagStr, i, 2));
+        if FlagId >= 0 then
+        begin
+          SetLength(Result, Length(Result) + 1);
+          Result[High(Result)] := FlagId;
+        end;
+        Inc(i, 2);
+      end;
+    end;
+    'NUM':
+    begin
+      i := 1;
+      while i <= Length(FlagStr) do
+      begin
+        while (i <= Length(FlagStr)) and (FlagStr[i] in [',', ' ', #9]) do Inc(i);
+        if i > Length(FlagStr) then Break;
+        startPos := i;
+        while (i <= Length(FlagStr)) and not (FlagStr[i] in [',', ' ', #9]) do Inc(i);
+        FlagId := InternFlag(Copy(FlagStr, startPos, i - startPos));
+        if FlagId >= 0 then
+        begin
+          SetLength(Result, Length(Result) + 1);
+          Result[High(Result)] := FlagId;
+        end;
+      end;
+    end;
+    else
+      for i := 1 to Length(FlagStr) do
+      begin
+        FlagId := InternFlag(FlagStr[i]);
+        if FlagId >= 0 then
+        begin
+          SetLength(Result, Length(Result) + 1);
+          Result[High(Result)] := FlagId;
+        end;
+      end;
   end;
 end;
 
@@ -1286,6 +1301,7 @@ begin
   SetLength(FIconvFrom, 0);
   SetLength(FIconvTo, 0);
   FillChar(FIconvFirstBytes, SizeOf(FIconvFirstBytes), 0);
+  FillChar(FIconvToFirstBytes, SizeOf(FIconvToFirstBytes), 0);
   SetLength(FOCONVFrom, 0);
   SetLength(FOCONVTo, 0);
   SetLength(FWordCharsCodes, 0);
@@ -1425,6 +1441,7 @@ begin
     SetLength(FIconvFrom, 0);
     SetLength(FIconvTo, 0);
     FillChar(FIconvFirstBytes, SizeOf(FIconvFirstBytes), 0);
+    FillChar(FIconvToFirstBytes, SizeOf(FIconvToFirstBytes), 0);
     SetLength(FOCONVFrom, 0);
     SetLength(FOCONVTo, 0);
     SetLength(FWordCharsCodes, 0);
@@ -1509,6 +1526,7 @@ begin
     SetLength(FIconvFrom, 0);
     SetLength(FIconvTo, 0);
     FillChar(FIconvFirstBytes, SizeOf(FIconvFirstBytes), 0);
+    FillChar(FIconvToFirstBytes, SizeOf(FIconvToFirstBytes), 0);
     SetLength(FOCONVFrom, 0);
     SetLength(FOCONVTo, 0);
     SetLength(FWordCharsCodes, 0);
@@ -2176,6 +2194,11 @@ begin
     for i := 0 to High(FIconvFrom) do
       if FIconvFrom[i] <> '' then
         FIconvFirstBytes[Ord(FIconvFrom[i][1])] := True;
+    // Precompute the set of first bytes of all ICONV target patterns
+    FillChar(FIconvToFirstBytes, SizeOf(FIconvToFirstBytes), 0);
+    for i := 0 to High(FIconvTo) do
+      if FIconvTo[i] <> '' then
+        FIconvToFirstBytes[Ord(FIconvTo[i][1])] := True;
 
     // Mark every flag that appears in any COMPOUNDRULE atom, so that
     // CollectCompoundFlags can skip unrelated flags during compound matching
@@ -3407,6 +3430,7 @@ end;
 function THunSpellChecker.TryCompoundWordRec(const word: string; depth: integer): boolean;
 var
   i, lenWord, minPart, maxParts: integer;
+  k, Step: integer;
   leftPart, rightPart: string;
   leftFlags: TIntegerArray = ();
   rightFlags: TIntegerArray = ();
@@ -3417,6 +3441,8 @@ var
   ChA, ChB, ChC: string;
   Simplified: string;
   SIdx: integer = 0;
+  ByteOffsets: TIntegerArray = nil;
+  CPtr: pchar = nil;
 begin
   Result := False;
   if word = '' then Exit;
@@ -3434,11 +3460,26 @@ begin
   if minPart < 1 then minPart := 1;
   if lenWord < minPart * 2 then Exit;
 
+  // Precompute byte offsets of every character boundary once, so left and
+  // right parts are sliced with plain Copy instead of UTF8Copy, which would
+  // rescan the prefix on every split position
+  SetLength(ByteOffsets, lenWord + 1);
+  ByteOffsets[0] := 1;
+  CPtr := PChar(word);
+  for k := 1 to lenWord do
+  begin
+    {$NOTES OFF}
+    Step := UTF8CodepointSize(CPtr);
+    {$NOTES ON}
+    ByteOffsets[k] := ByteOffsets[k - 1] + Step;
+    Inc(CPtr, Step);
+  end;
+
   for i := minPart to lenWord - minPart do
   begin
     if (FCancelFlag <> nil) and (FCancelFlag^ <> 0) then Exit;
-    leftPart := UTF8Copy(word, 1, i);
-    rightPart := UTF8Copy(word, i + 1, MaxInt);
+    leftPart := Copy(word, ByteOffsets[0], ByteOffsets[i] - ByteOffsets[0]);
+    rightPart := Copy(word, ByteOffsets[i], ByteOffsets[lenWord] - ByteOffsets[i]);
 
     // CHECKCOMPOUNDDUP: reject identical adjacent parts
     if FCheckCompoundDup and (leftPart = rightPart) then Continue;
@@ -3911,10 +3952,8 @@ begin
     if FWordCharsCodes[i] = CodePoint then Exit(True);
 
   // Any character that appears on either side of an ICONV rule is treated
-  // as part of a word. The source side keeps the original quote character
-  // inside a token, while the target side makes the converted form (for
-  // example the ASCII apostrophe that replaces a typographic quote) count
-  // as a word character as well
+  // as part of a word. The byte-level index skips the linear scan when no
+  // rule can begin with the current first byte
   if (Length(FIconvFrom) > 0) or (Length(FIconvTo) > 0) then
   begin
     SetLength(ChStr, CharLen);
@@ -3922,8 +3961,9 @@ begin
     if FIconvFirstBytes[Ord(Ch^)] then
       for i := 0 to High(FIconvFrom) do
         if FIconvFrom[i] = ChStr then Exit(True);
-    for i := 0 to High(FIconvTo) do
-      if FIconvTo[i] = ChStr then Exit(True);
+    if FIconvToFirstBytes[Ord(Ch^)] then
+      for i := 0 to High(FIconvTo) do
+        if FIconvTo[i] = ChStr then Exit(True);
   end;
 
   Result := False;
@@ -3932,9 +3972,11 @@ end;
 function THunSpellChecker.CheckText(const Text: string): TSpellErrorArray;
 var
   Ptr: pchar;
+  TextStart: pchar;
   CharLen: integer;
   CharIndex: integer;
   WordStartChar: integer;
+  WordStartByte: integer;
   WordLengthChars: integer;
   InWord: boolean;
   word: string;
@@ -3942,10 +3984,13 @@ var
 begin
   Result := nil;
   SetLength(Result, 0);
-  Ptr := PChar(Text);
+  if Text = '' then Exit;
+  TextStart := PChar(Text);
+  Ptr := TextStart;
   CharIndex := 0;
   InWord := False;
   WordStartChar := 0;
+  WordStartByte := 1;
   WordLengthChars := 0;
   while Ptr^ <> #0 do
   begin
@@ -3963,6 +4008,7 @@ begin
       if not InWord then
       begin
         WordStartChar := CharIndex;
+        WordStartByte := (Ptr - TextStart) + 1;
         WordLengthChars := 0;
         InWord := True;
       end;
@@ -3972,7 +4018,7 @@ begin
     begin
       if InWord then
       begin
-        word := UTF8Copy(Text, WordStartChar + 1, WordLengthChars);
+        word := Copy(Text, WordStartByte, (Ptr - TextStart) - WordStartByte + 1);
         if not CheckWord(word) then
         begin
           Err.Offset := WordStartChar;
@@ -3994,7 +4040,7 @@ begin
   end;
   if InWord then
   begin
-    word := UTF8Copy(Text, WordStartChar + 1, WordLengthChars);
+    word := Copy(Text, WordStartByte, Length(Text) - WordStartByte + 1);
     if not CheckWord(word) then
     begin
       Err.Offset := WordStartChar;
@@ -4448,6 +4494,13 @@ begin
   MaxLenExt := TargetLen + 4;
   if MaxLenExt > High(FLengthBuckets) then MaxLenExt := High(FLengthBuckets);
 
+  // Hoist the two-character prefix of the target once. The byte-level
+  // comparison against each candidate removes the per-candidate UTF8Copy
+  // that the previous version performed inside the hot loop
+  TargetPrefix := '';
+  if TargetLen >= 4 then
+    TargetPrefix := UTF8Copy(TargetLower, 1, 2);
+
   for Len := MinLenExt to MaxLenExt do
   begin
     if (FCancelFlag <> nil) and (FCancelFlag^ <> 0) then Exit;
@@ -4459,8 +4512,7 @@ begin
       CandidateLower := FAllWordsLower[WordIndex];
       if TargetLen >= 4 then
       begin
-        TargetPrefix := UTF8Copy(TargetLower, 1, 2);
-        if UTF8Copy(CandidateLower, 1, 2) <> TargetPrefix then Continue;
+        if not ByteStartsWith(TargetPrefix, CandidateLower) then Continue;
       end
       else
       begin
