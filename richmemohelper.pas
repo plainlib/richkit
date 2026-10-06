@@ -136,6 +136,7 @@ uses
 const
   SCROLLBAR_FIX_TIMER_ID = 1;
   SCROLLBAR_FIX_INTERVAL = 30;
+  SCROLLBAR_DRAG_PROP = 'ScrollFixDragging';
   tomSuspend = -9999995;
   tomResume = -9999994;
 
@@ -150,6 +151,8 @@ var
   CursorPos: TPoint;
   ScrollbarSize: Integer;
   OverScrollbar: Boolean;
+  Dragging: Boolean;
+  LeftDown: Boolean;
   NeedComposited: Boolean;
   CurrentComposited: Boolean;
   ExStyle: LONG_PTR;
@@ -191,10 +194,30 @@ begin
         OverScrollbar := True;
   end;
 
-  // Keep compositing disabled only while dragging a scrollbar
-  NeedComposited :=
-    not (OverScrollbar and
-         ((GetAsyncKeyState(VK_LBUTTON) and $8000) <> 0));
+  // A scrollbar drag session starts only when the left button is pressed
+  // while the cursor is over the scrollbar. Once started, the session
+  // continues until the left button is released, even if the cursor
+  // moves away from the scrollbar area. This keeps the scrollbar repainting
+  // correctly for the whole drag, not only while the cursor stays on it
+  Dragging := GetProp(Wnd, SCROLLBAR_DRAG_PROP) <> nil;
+  LeftDown := (GetAsyncKeyState(VK_LBUTTON) and $8000) <> 0;
+
+  if LeftDown then
+  begin
+    if (not Dragging) and OverScrollbar then
+    begin
+      Dragging := True;
+      SetProp(Wnd, SCROLLBAR_DRAG_PROP, Pointer(1));
+    end;
+  end
+  else if Dragging then
+  begin
+    Dragging := False;
+    RemoveProp(Wnd, SCROLLBAR_DRAG_PROP);
+  end;
+
+  // Keep compositing disabled for the whole scrollbar drag session
+  NeedComposited := not Dragging;
 
   ExStyle := GetWindowLongPtr(ParentPanel.Handle, GWL_EXSTYLE);
   CurrentComposited := (ExStyle and WS_EX_COMPOSITED) <> 0;
