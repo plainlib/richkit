@@ -252,7 +252,7 @@ type
     SelLength: integer;
   end;
 
-  {$IFDEF LCLGTK2}
+{$IFDEF LCLGTK2}
 
 // The GTK2 bindings shipped with FPC do not export this function, so
 // declare it directly from the GObject library. It is the only public way
@@ -852,6 +852,8 @@ var
   Snap: TRichMemoSnapshot;
   RedoSnap: TRichMemoSnapshot;
 begin
+  if Self.ReadOnly then Exit;
+
   T := FindTracker(Self);
   if not Assigned(T) then
   begin
@@ -906,6 +908,8 @@ var
   Snap: TRichMemoSnapshot;
   UndoSnap: TRichMemoSnapshot;
 begin
+  if Self.ReadOnly then Exit;
+
   T := FindTracker(Self);
   if not Assigned(T) then
   begin
@@ -1013,6 +1017,7 @@ var
   {$ENDIF}
 begin
   Result := False;
+  if Self.ReadOnly then Exit;
 
   if AUseHtmlFormat then
     HtmlText := GetHtmlFromClipboard
@@ -1170,6 +1175,14 @@ begin
 
   // Copy selected content to clipboard
   if not Self.CopyToClipboardEx then Exit;
+
+  // In read-only mode the copy part is enough, skip the deletion
+  if Self.ReadOnly then
+  begin
+    Result := True;
+    Exit;
+  end;
+
   BeginUndoBatch;
   try
     // Delete the selected text
@@ -1183,6 +1196,15 @@ begin
 
   {$IFDEF LCLGTK2}
   if Self.SelLength = 0 then Exit;
+
+  // In read-only mode emulate Ctrl+C instead of the real cut
+  if Self.ReadOnly then
+  begin
+    EmitGtkClipboardSignal(Self, 'copy-clipboard');
+    Result := True;
+    Exit;
+  end;
+
   BeginUndoBatch;
   try
     EmitGtkClipboardSignal(Self, 'cut-clipboard');
@@ -1208,6 +1230,10 @@ begin
 
   // Put the cleaned text into the clipboard.
   Clipboard.AsText := SelectedText;
+
+  // In read-only mode the copy part is enough, skip the deletion
+  if Self.ReadOnly then Exit;
+
   BeginUndoBatch;
   try
     Self.ClearSelection;
@@ -1221,6 +1247,8 @@ procedure TRichMemoHelper.PasteWithLineEnding;
 var
   s: string;
 begin
+  if Self.ReadOnly then Exit;
+
   // Check for plain text or, on Windows, unicode text
   if Clipboard.HasFormat(CF_TEXT)
   {$IFDEF WINDOWS}
@@ -1255,6 +1283,7 @@ var
   MarkerCharPos: integer;
 begin
   if ARtf = '' then Exit;
+  if Self.ReadOnly then Exit;
 
   BeginUndoBatch;
   try
@@ -2063,6 +2092,8 @@ var
   TextLen: integer;
 begin
   if Self.Text = '' then Exit;
+  if Self.ReadOnly then Exit;
+
   TextLen := Length(UTF8ToUTF16(Self.Text));
   BeginUndoBatch;
   try
