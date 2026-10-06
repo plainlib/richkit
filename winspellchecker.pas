@@ -3,6 +3,28 @@
 //  Licensed under the MIT License
 //  You may obtain a copy of the License at https://opensource.org/licenses/MIT
 //-----------------------------------------------------------------------------------
+//  Windows Spell Checker integration. Uses the system ISpellCheckerFactory
+//  to enumerate supported BCP-47 language tags and to check text.
+//
+//  Windows only ships a limited set of spell checking languages by default.
+//  If a language is missing from the supported list, its Language Features
+//  On Demand package must be installed. Run PowerShell as Administrator.
+//
+//  List all installed basic language capabilities:
+//    Get-WindowsCapability -Online | Where-Object { $_.Name -like "*Language.Basic*" }
+//
+//  Install a language (example for English US):
+//    Add-WindowsCapability -Online -Name "Language.Basic~~~en-US~0.0.1.0"
+//
+//  Remove a language:
+//    Remove-WindowsCapability -Online -Name "Language.Basic~~~en-US~0.0.1.0"
+//
+//  The en-US part is a BCP-47 tag and must match the tag reported by the
+//  spell checker. Replace it with the desired language, for example ru-RU,
+//  de-DE, fr-FR and so on. After installation the language becomes visible
+//  in the supported list, but the cached list inside this unit may need a
+//  refresh through ResetSupportedLanguagesCache before it is picked up.
+//-----------------------------------------------------------------------------------
 
 unit WinSpellChecker;
 
@@ -29,7 +51,6 @@ type
   TSpellErrorArray = array of TSpellError;
 
   TSupportedLanguages = array of widestring;
-
 
   IEnumString = interface(IUnknown)
     ['{00000101-0000-0000-C000-000000000046}']
@@ -101,6 +122,9 @@ function IsLanguageSupported(const LanguageTag: widestring): boolean;
 
 // Returns a list of all available spell checker language tags in BCP-47 format
 function GetSupportedSpellCheckerLanguages: TSupportedLanguages;
+
+// Clears the cached language list so the next call re-reads it from Windows
+procedure ResetSupportedLanguagesCache;
 
 {$ENDIF}
 
@@ -548,6 +572,12 @@ begin
   SpellCheckerLanguagesCache := langList;
   SpellCheckerLanguagesCached := True;
   Result := SpellCheckerLanguagesCache;
+end;
+
+procedure ResetSupportedLanguagesCache;
+begin
+  SpellCheckerLanguagesCache := nil;
+  SpellCheckerLanguagesCached := False;
 end;
 
 function IsLanguageSupported(const LanguageTag: widestring): boolean;
