@@ -453,6 +453,111 @@ begin
   end;
 end;
 
+// Removes all text tags from the memo buffer using the native GTK call.
+// Unlike SetRangeParams, which adds tag toggles on top of existing ones,
+// gtk_text_buffer_remove_all_tags is a single buffer operation. It does
+// not remove stale entries from the internal btree, but it may be cheaper
+// than a full range SetRangeParams on some GTK versions. The call is
+// wrapped in GtkBeginBatch/GtkEndBatch so the widget redraws once, and
+// undo is suppressed so the operation is not recorded in the undo history.
+// The caret and selection are saved and restored.
+// WARNING: this removes every tag in the range, including tags added by
+// RichMemo, LCL or other components. Use it only when no other code
+// applies tags to the same memo.
+procedure RemoveAllTagsNative(ARichMemo: TRichMemo);
+{$IFDEF LCLGTK2}
+var
+  Widget: PGtkWidget = nil;
+  Buffer: PGtkTextBuffer = nil;
+  StartIter, EndIter: TGtkTextIter;
+  OldSelStart: integer = 0;
+  OldSelLength: integer = 0;
+{$ENDIF}
+{$IFDEF LCLGTK3}
+var
+  Widget: PGtkWidget = nil;
+  Buffer: PGtkTextBuffer = nil;
+  StartIter, EndIter: TGtkTextIter;
+  OldSelStart: integer = 0;
+  OldSelLength: integer = 0;
+{$ENDIF}
+begin
+  {$IFDEF LCLGTK2}
+  if not Assigned(ARichMemo) then
+    Exit;
+
+  // ARichMemo.Handle is a THandle (HWND on Windows, a widget pointer on
+  // GTK). Cast it through PGtkWidget the same way GtkBeginBatch does, so
+  // the compiler accepts the pointer conversion.
+  {$HINTS OFF}
+  Widget := PGtkWidget(ARichMemo.Handle);
+  {$HINTS ON}
+  if Widget = nil then
+    Exit;
+
+  Buffer := gtk_text_view_get_buffer(GTK_TEXT_VIEW(Widget));
+  if Buffer = nil then
+    Exit;
+
+  OldSelStart := ARichMemo.SelStart;
+  OldSelLength := ARichMemo.SelLength;
+
+  ARichMemo.SuspendUndo;
+  try
+    GtkBeginBatch(ARichMemo);
+    try
+      gtk_text_buffer_get_start_iter(Buffer, @StartIter);
+      gtk_text_buffer_get_end_iter(Buffer, @EndIter);
+      gtk_text_buffer_remove_all_tags(Buffer, @StartIter, @EndIter);
+    finally
+      if ARichMemo.SelStart <> OldSelStart then
+        ARichMemo.SelStart := OldSelStart;
+      if ARichMemo.SelLength <> OldSelLength then
+        ARichMemo.SelLength := OldSelLength;
+      GtkEndBatch(ARichMemo);
+    end;
+  finally
+    ARichMemo.ResumeUndo;
+  end;
+  {$ENDIF}
+  {$IFDEF LCLGTK3}
+  // GTK3 exposes the same functions with the same signatures, so the body
+  // is identical. Kept separate to make future platform specific tweaks
+  // easy to add without touching the GTK2 branch.
+  if not Assigned(ARichMemo) then
+    Exit;
+
+  Widget := PGtkWidget(ARichMemo.Handle);
+  if Widget = nil then
+    Exit;
+
+  Buffer := gtk_text_view_get_buffer(GTK_TEXT_VIEW(Widget));
+  if Buffer = nil then
+    Exit;
+
+  OldSelStart := ARichMemo.SelStart;
+  OldSelLength := ARichMemo.SelLength;
+
+  ARichMemo.SuspendUndo;
+  try
+    GtkBeginBatch(ARichMemo);
+    try
+      gtk_text_buffer_get_start_iter(Buffer, @StartIter);
+      gtk_text_buffer_get_end_iter(Buffer, @EndIter);
+      gtk_text_buffer_remove_all_tags(Buffer, @StartIter, @EndIter);
+    finally
+      if ARichMemo.SelStart <> OldSelStart then
+        ARichMemo.SelStart := OldSelStart;
+      if ARichMemo.SelLength <> OldSelLength then
+        ARichMemo.SelLength := OldSelLength;
+      GtkEndBatch(ARichMemo);
+    end;
+  finally
+    ARichMemo.ResumeUndo;
+  end;
+  {$ENDIF}
+end;
+
 procedure ClearSpellErrors(ARichMemo: TRichMemo);
 {$IFDEF WINDOWS}
 var
@@ -460,9 +565,6 @@ var
   cf: CHARFORMAT2W;
   cr: CHARRANGE;
   scrollPos: TPoint;
-{$ELSE}
-var
-  OldSelStart, OldSelLength: integer;
 {$ENDIF}
 begin
   {$IFDEF WINDOWS}
@@ -515,47 +617,15 @@ begin
   if Length(ARichMemo.Text) = 0 then
     Exit;
 
-  // On GTK every SetRangeParams call updates the widget synchronously, and
-  // the selection may be modified as a side effect, which in turn scrolls
-  // the view to the caret. Save the selection once, wrap the whole clear in
-  // BeginUpdate/EndUpdate to suppress intermediate repaints, and restore the
-  // selection only when it actually changed. This keeps the user's scroll
-  // position stable while underlines are cleared and redrawn in background.
-  // GtkBeginBatch/GtkEndBatch collapse the call into one user action, so the
-  // widget is redrawn once instead of after each internal change.
-  // Clearing underlines is service formatting and must not be recorded in
-  // the undo tracker, so suppress undo for the whole operation.
-  OldSelStart := ARichMemo.SelStart;
-  OldSelLength := ARichMemo.SelLength;
-
-  ARichMemo.SuspendUndo;
+  // RemoveAllTagsNative owns batching (GtkBeginBatch/GtkEndBatch), undo
+  // suspension and selection restore on GTK, so no additional wrapping
+  // is needed here. Lines.BeginUpdate still collapses the widget level
+  // layout pass into a single one.
+  ARichMemo.Lines.BeginUpdate;
   try
-    GtkBeginBatch(ARichMemo);
-    try
-      ARichMemo.Lines.BeginUpdate;
-      try
-        ARichMemo.SetRangeParams(
-          0,
-          Length(ARichMemo.Text),
-          [tmm_Styles, tmm_Color],
-          '',
-          0,
-          clWindowText,
-          [],
-          []
-          );
-      finally
-        if ARichMemo.SelStart <> OldSelStart then
-          ARichMemo.SelStart := OldSelStart;
-        if ARichMemo.SelLength <> OldSelLength then
-          ARichMemo.SelLength := OldSelLength;
-        ARichMemo.Lines.EndUpdate;
-      end;
-    finally
-      GtkEndBatch(ARichMemo);
-    end;
+    RemoveAllTagsNative(ARichMemo);
   finally
-    ARichMemo.ResumeUndo;
+    ARichMemo.Lines.EndUpdate;
   end;
   {$ENDIF}
 end;
@@ -615,9 +685,15 @@ end;
 
 procedure TRichSpellChecker.Clear;
 var
-  i: integer;
-  p: PSpellError;
+  i: integer = 0;
+  p: PSpellError = nil;
 begin
+  // Clear the drawn underlines before releasing the error records. The
+  // order does not matter functionally, but freeing the pointers first
+  // would leave the memo holding stale underline ranges in case the
+  // clear path is ever changed to inspect FErrors.
+  ClearUnderlines;
+
   for i := FErrors.Count - 1 downto 0 do
   begin
     p := PSpellError(FErrors[i]);
@@ -632,7 +708,6 @@ begin
   // Reset the incremental draw marker. Any errors added after this point
   // must be treated as new, because the visual underlines were just wiped.
   FErrorsAtBeginUpdate := 0;
-  ClearUnderlines;
 end;
 
 procedure TRichSpellChecker.BeginUpdate;
