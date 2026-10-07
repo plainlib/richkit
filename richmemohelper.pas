@@ -1139,7 +1139,10 @@ begin
     begin
       ms := TMemoryStream.Create;
       try
-        ms.WriteBuffer(PlainText[1], Length(PlainText));
+        // LCL's AddFormat strips the last stream byte assuming it is a
+        // null terminator, so one extra byte is written past the end of
+        // the string: FPC keeps it zero, making the trick safe
+        ms.WriteBuffer(PlainText[1], Length(PlainText) + 1);
         ms.Position := 0;
         Clipboard.AddFormat(CF_UNICODETEXT, ms);
       finally
