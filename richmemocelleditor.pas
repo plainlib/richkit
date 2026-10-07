@@ -36,6 +36,7 @@ type
     procedure MsgSetValue(var Msg: TGridMessage); message GM_SETVALUE;
     procedure MsgGetValue(var Msg: TGridMessage); message GM_GETVALUE;
     procedure DoEnter; override;
+    function DoMouseWheel(Shift: TShiftState; WheelDelta: integer; MousePos: TPoint): boolean; override;
     procedure InitializeEditor; virtual;
     procedure ApplyPendingValue;
     procedure CMShowingChanged(var Msg: TLMessage); message CM_SHOWINGCHANGED;
@@ -218,6 +219,8 @@ begin
 end;
 
 procedure TRichMemoCellEditor.ApplyPendingValue;
+var
+  SavedZoom: double;
 begin
   if not FPendingValueSet then
     Exit;
@@ -230,6 +233,9 @@ begin
   // Force the window handle to exist before touching the text
   HandleNeeded;
 
+  // Preserve the zoom level across text reassignment
+  SavedZoom := ZoomFactor;
+
   Lines.BeginUpdate;
   try
     Clear;
@@ -241,6 +247,8 @@ begin
   finally
     Lines.EndUpdate;
   end;
+
+  ZoomFactor := SavedZoom;
 
   FPendingValueSet := False;
 end;
@@ -313,6 +321,22 @@ begin
   end
   else
     SelectAll;
+end;
+
+function TRichMemoCellEditor.DoMouseWheel(Shift: TShiftState; WheelDelta: integer; MousePos: TPoint): boolean;
+begin
+  if ssCtrl in Shift then
+  begin
+    // Ctrl+mouse wheel changes the editor zoom just like in regular rich memos
+    if WheelDelta > 0 then
+      ZoomFactor := ZoomFactor * 1.1
+    else if WheelDelta < 0 then
+      ZoomFactor := ZoomFactor / 1.1;
+    Result := True;
+  end
+  else
+    // Plain wheel bubbles up so the grid can scroll this editor
+    Result := False;
 end;
 
 end.
