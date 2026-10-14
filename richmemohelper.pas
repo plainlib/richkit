@@ -20,6 +20,8 @@ uses
   StrUtils,
   Clipbrd,
   ExtCtrls,
+  DateUtils,
+  LMessages,
   {$IFDEF WINDOWS}
   Windows,
   RichEdit,
@@ -28,23 +30,75 @@ uses
   LCLType,
   LCLIntf,
   LazUtf8,
+  Character,
   RichMemo,
   RichMemoHelpers;
 
 type
   TRichMemoHelper = class helper(TRichEditForMemo) for TRichMemo
   public
+    {%Region -fold Public Methods}
+
+    { Undo Tracker }
+
+    // Starts tracking changes and enables undo and redo
     procedure EnableUndo;
+
+    // Stops tracking and restores the original event handlers
     procedure DisableUndo;
+
+    // Returns True when the undo tracker is attached to this memo
     function IsUndoEnabled: boolean;
+
+    // Starts a batch so several edits form a single undo step
     procedure BeginUndoBatch;
+
+    // Ends the current batch started by BeginUndoBatch
     procedure EndUndoBatch;
+
+    // Commits the pending change as an undo step immediately
     procedure PushUndoSnapshot;
+
+    // Reverts the last recorded change
     procedure UndoEx;
+
+    // Reapplies the last reverted change
     procedure RedoEx;
+
+    // Returns True when there is a change available to undo
     function CanUndo: boolean;
+
+    // Returns True when there is a change available to redo
     function CanRedo: boolean;
+
+    // Discards all recorded undo and redo steps
     procedure ClearUndoHistory;
+
+    // Temporarily suspend Undo recording to avoid formatting operations being undoable
+    // Suspend Undo recording
+    procedure SuspendUndo;
+
+    // Temporarily suspend Undo recording to avoid formatting operations being undoable
+    // Resume Undo recording
+    procedure ResumeUndo;
+
+    { Smart Selection}
+
+    // Enables word selection on double-click and paragraph selection on
+    // triple-click for this memo. AExtraChars lists characters treated
+    // as part of a word
+    procedure EnableSmartSelection(const AExtraChars: unicodestring = '_-@');
+
+    // Removes the smart selection behaviour from this memo
+    procedure DisableSmartSelection;
+
+    // Returns True when smart selection is active for this memo
+    function IsSmartSelectionEnabled: boolean;
+
+    // Selects the whole paragraph that contains the given position
+    procedure SelectParagraphAt(APos: integer);
+
+    { Clipboard }
 
     // Paste HTML content from clipboard as RTF at cursor position
     function PasteFromClipboardEx(AUseHtmlFormat: boolean = True): boolean;
@@ -61,6 +115,8 @@ type
     // Inserts clipboard text, normalizing all line endings to LineEnding.
     procedure PasteWithLineEnding;
 
+    { RTF Formating }
+
     // Detects whether the document contains rich text formatting
     function HasRichFormatting: boolean;
 
@@ -68,6 +124,8 @@ type
     // The fragment should be raw RTF content (e.g., '{\b bold}') without
     // the outer document braces and header.
     procedure InsertRtfAtCursor(const ARtf: string);
+
+    { Misc }
 
     // Set text bidi mode
     procedure ApplyBidiMode;
@@ -87,14 +145,6 @@ type
     // Selects the token at APos, treating AExtraChars as part of word characters.
     procedure MemoTokenAtPos(APos: integer; const AExtraChars: unicodestring);
 
-    // Temporarily suspend Undo recording to avoid formatting operations being undoable
-    // Suspend Undo recording
-    procedure SuspendUndo;
-
-    // Temporarily suspend Undo recording to avoid formatting operations being undoable
-    // Resume Undo recording
-    procedure ResumeUndo;
-
     // Sets the left indent (in pixels) for all paragraphs in the document.
     procedure SetLeftIndent(AIndentPixels: integer = 3);
 
@@ -112,6 +162,8 @@ type
 
     // Apply memo settings and related visual properties.
     procedure UpdateState(AIndentPixels: integer = 3; AResetParaSpacing: boolean = False);
+
+    {%EndRegion}
   end;
 
 implementation
@@ -131,6 +183,7 @@ uses
   stringhelper,
   controlshelper;
 
+  {%Region -fold Windows helpers}
   {$IFDEF WINDOWS}
 
 const
@@ -227,6 +280,9 @@ begin
 end;
 
   {$ENDIF}
+  {%EndRegion}
+
+  {%Region -fold Snapshot types}
 
 type
   TSnapshotKind = (skNone, skText, skRtf);
@@ -252,7 +308,10 @@ type
     SelLength: integer;
   end;
 
-{$IFDEF LCLGTK2}
+  {%EndRegion}
+
+  {%Region -fold GTK2 helpers}
+  {$IFDEF LCLGTK2}
 
 // The GTK2 bindings shipped with FPC do not export this function, so
 // declare it directly from the GObject library. It is the only public way
@@ -363,7 +422,54 @@ begin
     gtk_text_view_scroll_to_mark(View, Mark, 0.0, True, 0.0, 0.5);
 end;
 
-{$ENDIF}
+  {$ENDIF}
+  {%EndRegion}
+
+  {%Region -fold Undo tracker}
+
+const
+  MaxUndoSnapshots = 200;
+  UndoDebounceMs = 600;
+
+var
+  GTrackers: TFPList = nil;
+
+type
+  TRichMemoUndoTracker = class(TComponent)
+  public
+    Memo: TRichMemo;
+    Baseline: TRichMemoBaseline;
+    UndoStack: TRichMemoSnapshotArray;
+    RedoStack: TRichMemoSnapshotArray;
+    Timer: TTimer;
+    Suppress: boolean;
+    FInChange: boolean;
+    FInUndoRedo: boolean;
+    FBatchDepth: integer;
+    FDestroyed: boolean;
+    UserOnChange: TNotifyEvent;
+    UserOnSelectionChange: TNotifyEvent;
+    PendingCaretPos: integer;
+    PendingCaretLen: integer;
+    HasPendingCaret: boolean;
+    FBaselineStale: boolean;
+    FTrackRtfChanges: boolean;
+    constructor Create(AMemo: TRichMemo); reintroduce;
+    destructor Destroy; override;
+    procedure Notification(AComponent: TComponent; Operation: TOperation); override;
+    procedure BeginBatch;
+    procedure EndBatch;
+    procedure HandleChange(Sender: TObject);
+    procedure HandleSelectionChange(Sender: TObject);
+    procedure HandleTimer(Sender: TObject);
+    procedure ApplyPendingCaret(Data: PtrInt);
+    procedure CaptureBaseline;
+    function BuildSnapshot: TRichMemoSnapshot;
+    procedure CommitPendingChange;
+    procedure MarkBaselineStale;
+    procedure ApplyUndo(const S: TRichMemoSnapshot);
+    procedure ApplyRedo(const S: TRichMemoSnapshot);
+  end;
 
 procedure GetCaretState(AMemo: TRichMemo; out AStart, ALen: integer);
 begin
@@ -412,13 +518,6 @@ begin
   ANewTail := UTF8Encode(Copy(NewUC, P + 1, ANewTailChars));
 end;
 
-const
-  MaxUndoSnapshots = 200;
-  UndoDebounceMs = 600;
-
-var
-  GTrackers: TFPList = nil;
-
 procedure PushSnapshot(var A: TRichMemoSnapshotArray; const S: TRichMemoSnapshot; AMax: integer);
 var
   i: integer;
@@ -440,43 +539,6 @@ begin
   S := A[High(A)];
   SetLength(A, Length(A) - 1);
 end;
-
-type
-  TRichMemoUndoTracker = class(TComponent)
-  public
-    Memo: TRichMemo;
-    Baseline: TRichMemoBaseline;
-    UndoStack: TRichMemoSnapshotArray;
-    RedoStack: TRichMemoSnapshotArray;
-    Timer: TTimer;
-    Suppress: boolean;
-    FInChange: boolean;
-    FInUndoRedo: boolean;
-    FBatchDepth: integer;
-    FDestroyed: boolean;
-    UserOnChange: TNotifyEvent;
-    UserOnSelectionChange: TNotifyEvent;
-    PendingCaretPos: integer;
-    PendingCaretLen: integer;
-    HasPendingCaret: boolean;
-    FBaselineStale: boolean;
-    FTrackRtfChanges: boolean;
-    constructor Create(AMemo: TRichMemo); reintroduce;
-    destructor Destroy; override;
-    procedure Notification(AComponent: TComponent; Operation: TOperation); override;
-    procedure BeginBatch;
-    procedure EndBatch;
-    procedure HandleChange(Sender: TObject);
-    procedure HandleSelectionChange(Sender: TObject);
-    procedure HandleTimer(Sender: TObject);
-    procedure ApplyPendingCaret(Data: PtrInt);
-    procedure CaptureBaseline;
-    function BuildSnapshot: TRichMemoSnapshot;
-    procedure CommitPendingChange;
-    procedure MarkBaselineStale;
-    procedure ApplyUndo(const S: TRichMemoSnapshot);
-    procedure ApplyRedo(const S: TRichMemoSnapshot);
-  end;
 
 function FindTracker(AMemo: TRichMemo): TRichMemoUndoTracker;
 var
@@ -1017,6 +1079,293 @@ begin
   T.CaptureBaseline;
 end;
 
+procedure TRichMemoHelper.SuspendUndo;
+{$IFDEF WINDOWS}
+var
+  RichEditOle: IUnknown;
+  Doc: IDispatch;
+  DispID: TDispID;
+  Params: array[0..0] of OleVariant;
+  DispParams: TDispParams;
+  NameWide: WideString;
+  NamePtr: PWideChar;
+{$ENDIF}
+var
+  T: TRichMemoUndoTracker;
+begin
+  T := FindTracker(Self);
+  if Assigned(T) then
+  begin
+    // Flush any change still waiting in the debounce timer before
+    // suppression, otherwise ResumeUndo would silently swallow it when it
+    // captures a new baseline.
+    T.Timer.Enabled := False;
+    T.CommitPendingChange;
+    T.Suppress := True;
+  end;
+  {$IFDEF WINDOWS}
+  RichEditOle := nil;
+  DispParams:=Default(TDispParams);
+  {$HINTS OFF}
+  if SendMessage(Self.Handle, EM_GETOLEINTERFACE, 0, LPARAM(@RichEditOle)) = 0 then Exit;
+  {$HINTS ON}
+  if not Assigned(RichEditOle) then Exit;
+  if Failed(RichEditOle.QueryInterface(IDispatch, Doc)) then Exit;
+
+  NameWide := 'Undo';
+  NamePtr := PWideChar(NameWide);
+  if Failed(Doc.GetIDsOfNames(GUID_NULL, @NamePtr, 1, LOCALE_SYSTEM_DEFAULT, @DispID)) then
+    Exit;
+
+  {$NOTES OFF}
+  Params[0] := tomSuspend;
+  {$NOTES ON}
+  FillChar(DispParams, SizeOf(DispParams), 0);
+  DispParams.rgvarg := @Params[0];
+  DispParams.cArgs := 1;
+  Doc.Invoke(DispID, GUID_NULL, LOCALE_SYSTEM_DEFAULT, DISPATCH_METHOD,
+    DispParams, nil, nil, nil);
+  {$ENDIF}
+end;
+
+procedure TRichMemoHelper.ResumeUndo;
+{$IFDEF WINDOWS}
+var
+  RichEditOle: IUnknown;
+  Doc: IDispatch;
+  DispID: TDispID;
+  Params: array[0..0] of OleVariant;
+  DispParams: TDispParams;
+  NameWide: WideString;
+  NamePtr: PWideChar;
+{$ENDIF}
+var
+  T: TRichMemoUndoTracker;
+begin
+  {$IFDEF WINDOWS}
+  RichEditOle := nil;
+  DispParams:=Default(TDispParams);
+  {$HINTS OFF}
+  if SendMessage(Self.Handle, EM_GETOLEINTERFACE, 0, LPARAM(@RichEditOle)) = 0 then Exit;
+  {$HINTS ON}
+  if not Assigned(RichEditOle) then Exit;
+  if Failed(RichEditOle.QueryInterface(IDispatch, Doc)) then Exit;
+
+  NameWide := 'Undo';
+  NamePtr := PWideChar(NameWide);
+  if Failed(Doc.GetIDsOfNames(GUID_NULL, @NamePtr, 1, LOCALE_SYSTEM_DEFAULT, @DispID)) then
+    Exit;
+
+  {$NOTES OFF}
+  Params[0] := tomResume;
+  {$NOTES ON}
+  FillChar(DispParams, SizeOf(DispParams), 0);
+  DispParams.rgvarg := @Params[0];
+  DispParams.cArgs := 1;
+  Doc.Invoke(DispID, GUID_NULL, LOCALE_SYSTEM_DEFAULT, DISPATCH_METHOD,
+    DispParams, nil, nil, nil);
+  {$ENDIF}
+  T := FindTracker(Self);
+  if Assigned(T) then
+  begin
+    T.Suppress := False;
+    // Do not reserialize the RTF baseline here: this method runs during
+    // active spell-check processing, and a full RTF snapshot on a large
+    // document can stall the UI for seconds. Mark the baseline as stale
+    // instead; the debounce timer refreshes it once the user stops
+    // interacting.
+    T.MarkBaselineStale;
+  end;
+end;
+
+{%EndRegion}
+
+{%Region -fold Smart Selection tracker}
+
+type
+  // Per-memo state for smart word and paragraph selection
+  TRichMemoSmartSelection = class(TComponent)
+  public
+    Memo: TRichMemo;
+    ExtraChars: unicodestring;
+    ClickCount: integer;
+    LastClickTime: TDateTime;
+    LastX: integer;
+    LastY: integer;
+    SavedPos: integer;
+    OriginalWindowProc: TWndMethod;
+    constructor Create(AMemo: TRichMemo; const AExtraChars: unicodestring); reintroduce;
+    destructor Destroy; override;
+    procedure Notification(AComponent: TComponent; Operation: TOperation); override;
+    procedure MemoWindowProc(var Message: TLMessage);
+  end;
+
+var
+  GSmartSelections: TFPList = nil;
+
+function FindSmartSelection(AMemo: TRichMemo): TRichMemoSmartSelection;
+var
+  i: integer;
+begin
+  Result := nil;
+  if not Assigned(GSmartSelections) then Exit;
+  for i := 0 to GSmartSelections.Count - 1 do
+  begin
+    Result := TRichMemoSmartSelection(GSmartSelections[i]);
+    if Result.Memo = AMemo then Exit;
+  end;
+  Result := nil;
+end;
+
+constructor TRichMemoSmartSelection.Create(AMemo: TRichMemo; const AExtraChars: unicodestring);
+begin
+  inherited Create(nil);
+  Memo := AMemo;
+  ExtraChars := AExtraChars;
+  ClickCount := 0;
+  LastClickTime := 0;
+  LastX := -1;
+  LastY := -1;
+  SavedPos := 0;
+  AMemo.FreeNotification(Self);
+  // Replace the message handler instead of the mouse events. The user's
+  // OnMouseDown and OnDblClick stay untouched and are dispatched by the
+  // original handler that we call from inside our own
+  OriginalWindowProc := AMemo.WindowProc;
+  AMemo.WindowProc := @MemoWindowProc;
+end;
+
+destructor TRichMemoSmartSelection.Destroy;
+begin
+  if Assigned(Memo) then
+  begin
+    if Assigned(OriginalWindowProc) then
+      Memo.WindowProc := OriginalWindowProc;
+    Memo.RemoveFreeNotification(Self);
+  end;
+  inherited Destroy;
+end;
+
+procedure TRichMemoSmartSelection.Notification(AComponent: TComponent; Operation: TOperation);
+begin
+  inherited Notification(AComponent, Operation);
+  if (Operation = opRemove) and (AComponent = Memo) then
+    Memo := nil;
+end;
+
+procedure TRichMemoSmartSelection.MemoWindowProc(var Message: TLMessage);
+const
+  ClickInterval = 500;
+  ClickSlop = 5;
+var
+  CurrentTime: TDateTime;
+  SamePlace: boolean;
+  P: TPoint;
+begin
+  // Count consecutive clicks by position and time. LM_LBUTTONDBLCLK is
+  // sent instead of LM_LBUTTONDOWN for the second click on most
+  // widgetsets, and LM_LBUTTONTRIPLECLK is not guaranteed at all, so
+  // every one of these messages updates the same counter
+  case Message.Msg of
+    LM_LBUTTONDOWN, LM_LBUTTONDBLCLK, LM_LBUTTONTRIPLECLK:
+    begin
+      P := SmallPointToPoint(TLMMouse(Message).Pos);
+      CurrentTime := Now;
+      SamePlace := (Abs(P.X - LastX) <= ClickSlop) and (Abs(P.Y - LastY) <= ClickSlop);
+      if SamePlace and (MilliSecondsBetween(CurrentTime, LastClickTime) <= ClickInterval) then
+      begin
+        Inc(ClickCount);
+        if ClickCount > 3 then
+          ClickCount := 1;
+      end
+      else
+        ClickCount := 1;
+      LastClickTime := CurrentTime;
+      LastX := P.X;
+      LastY := P.Y;
+    end;
+  end;
+
+  // Let LCL and the widgetset do their normal work first: the caret
+  // moves, the user's own mouse and double-click events fire normally
+  OriginalWindowProc(Message);
+
+  // After the native processing, apply our own selection so it overrides
+  // the widgetset's word selection when needed
+  case Message.Msg of
+    LM_LBUTTONDOWN, LM_LBUTTONDBLCLK, LM_LBUTTONTRIPLECLK:
+      case ClickCount of
+        1:
+          // Remember the click position before any later click can
+          // move the caret to a word boundary on its own
+          SavedPos := Memo.SelStart;
+        2:
+          Memo.MemoTokenAtPos(SavedPos, ExtraChars);
+        3:
+          Memo.SelectParagraphAt(SavedPos);
+      end;
+  end;
+end;
+
+procedure TRichMemoHelper.EnableSmartSelection(const AExtraChars: unicodestring = '_-@');
+var
+  T: TRichMemoSmartSelection;
+begin
+  if Assigned(FindSmartSelection(Self)) then Exit;
+  T := TRichMemoSmartSelection.Create(Self, AExtraChars);
+  if not Assigned(GSmartSelections) then
+    GSmartSelections := TFPList.Create;
+  GSmartSelections.Add(T);
+end;
+
+procedure TRichMemoHelper.DisableSmartSelection;
+var
+  T: TRichMemoSmartSelection;
+  Idx: integer;
+begin
+  T := FindSmartSelection(Self);
+  if not Assigned(T) then Exit;
+  Idx := GSmartSelections.IndexOf(T);
+  if Idx >= 0 then GSmartSelections.Delete(Idx);
+  T.Free;
+end;
+
+function TRichMemoHelper.IsSmartSelectionEnabled: boolean;
+begin
+  Result := Assigned(FindSmartSelection(Self));
+end;
+
+procedure TRichMemoHelper.SelectParagraphAt(APos: integer);
+var
+  Text: unicodestring;
+  Len, StartPos, EndPos: integer;
+begin
+  Text := unicodestring(Self.Text);
+  Len := Length(Text);
+  if Len = 0 then Exit;
+  if APos < 0 then APos := 0;
+  if APos >= Len then APos := Len - 1;
+
+  // Switch to 1-based string indexing
+  StartPos := APos + 1;
+  EndPos := APos + 1;
+
+  // Walk back to the start of the paragraph
+  while (StartPos > 1) and (Text[StartPos - 1] <> #10) and (Text[StartPos - 1] <> #13) do
+    Dec(StartPos);
+
+  // Walk forward to the end of the paragraph
+  while (EndPos <= Len) and (Text[EndPos] <> #10) and (Text[EndPos] <> #13) do
+    Inc(EndPos);
+
+  Self.SelStart := StartPos - 1;
+  Self.SelLength := EndPos - StartPos;
+end;
+
+{%EndRegion}
+
+{%Region -fold Clipboard}
+
 function TRichMemoHelper.PasteFromClipboardEx(AUseHtmlFormat: boolean = True): boolean;
 var
   HtmlText: string = '';
@@ -1284,6 +1633,10 @@ begin
   end;
 end;
 
+{%EndRegion}
+
+{%Region -fold RTF formatting}
+
 procedure TRichMemoHelper.InsertRtfAtCursor(const ARtf: string);
 var
   Marker: string = '@@RTFCURSOR@@';
@@ -1465,6 +1818,10 @@ begin
     until foundPos = 0;
   end;
 end;
+
+{%EndRegion}
+
+{%Region -fold Misc helpers}
 
 procedure TRichMemoHelper.ApplyBidiMode;
 {$IFDEF WINDOWS}
@@ -1747,7 +2104,11 @@ var
 
   function IsLetterOrDigit(ch: widechar): boolean;
   begin
-    Result := (ch in ['0'..'9', 'A'..'Z', 'a'..'z']) or (ch > #127);
+    // Use the real Unicode category instead of the "anything above
+    // ASCII" rule, otherwise quotes and dashes stick to the word
+    {$NOTES OFF}
+    Result := TCharacter.IsLetterOrDigit(ch);
+    {$NOTES ON}
   end;
 
   function IsExtraChar(ACh: widechar): boolean;
@@ -1815,105 +2176,6 @@ begin
 
   Self.SelStart := LeftIdx - 1;
   Self.SelLength := RightIdx - LeftIdx;
-end;
-
-procedure TRichMemoHelper.SuspendUndo;
-{$IFDEF WINDOWS}
-var
-  RichEditOle: IUnknown;
-  Doc: IDispatch;
-  DispID: TDispID;
-  Params: array[0..0] of OleVariant;
-  DispParams: TDispParams;
-  NameWide: WideString;
-  NamePtr: PWideChar;
-{$ENDIF}
-var
-  T: TRichMemoUndoTracker;
-begin
-  T := FindTracker(Self);
-  if Assigned(T) then
-  begin
-    // Flush any change still waiting in the debounce timer before
-    // suppression, otherwise ResumeUndo would silently swallow it when it
-    // captures a new baseline.
-    T.Timer.Enabled := False;
-    T.CommitPendingChange;
-    T.Suppress := True;
-  end;
-  {$IFDEF WINDOWS}
-  RichEditOle := nil;
-  DispParams:=Default(TDispParams);
-  {$HINTS OFF}
-  if SendMessage(Self.Handle, EM_GETOLEINTERFACE, 0, LPARAM(@RichEditOle)) = 0 then Exit;
-  {$HINTS ON}
-  if not Assigned(RichEditOle) then Exit;
-  if Failed(RichEditOle.QueryInterface(IDispatch, Doc)) then Exit;
-
-  NameWide := 'Undo';
-  NamePtr := PWideChar(NameWide);
-  if Failed(Doc.GetIDsOfNames(GUID_NULL, @NamePtr, 1, LOCALE_SYSTEM_DEFAULT, @DispID)) then
-    Exit;
-
-  {$NOTES OFF}
-  Params[0] := tomSuspend;
-  {$NOTES ON}
-  FillChar(DispParams, SizeOf(DispParams), 0);
-  DispParams.rgvarg := @Params[0];
-  DispParams.cArgs := 1;
-  Doc.Invoke(DispID, GUID_NULL, LOCALE_SYSTEM_DEFAULT, DISPATCH_METHOD,
-    DispParams, nil, nil, nil);
-  {$ENDIF}
-end;
-
-procedure TRichMemoHelper.ResumeUndo;
-{$IFDEF WINDOWS}
-var
-  RichEditOle: IUnknown;
-  Doc: IDispatch;
-  DispID: TDispID;
-  Params: array[0..0] of OleVariant;
-  DispParams: TDispParams;
-  NameWide: WideString;
-  NamePtr: PWideChar;
-{$ENDIF}
-var
-  T: TRichMemoUndoTracker;
-begin
-  {$IFDEF WINDOWS}
-  RichEditOle := nil;
-  DispParams:=Default(TDispParams);
-  {$HINTS OFF}
-  if SendMessage(Self.Handle, EM_GETOLEINTERFACE, 0, LPARAM(@RichEditOle)) = 0 then Exit;
-  {$HINTS ON}
-  if not Assigned(RichEditOle) then Exit;
-  if Failed(RichEditOle.QueryInterface(IDispatch, Doc)) then Exit;
-
-  NameWide := 'Undo';
-  NamePtr := PWideChar(NameWide);
-  if Failed(Doc.GetIDsOfNames(GUID_NULL, @NamePtr, 1, LOCALE_SYSTEM_DEFAULT, @DispID)) then
-    Exit;
-
-  {$NOTES OFF}
-  Params[0] := tomResume;
-  {$NOTES ON}
-  FillChar(DispParams, SizeOf(DispParams), 0);
-  DispParams.rgvarg := @Params[0];
-  DispParams.cArgs := 1;
-  Doc.Invoke(DispID, GUID_NULL, LOCALE_SYSTEM_DEFAULT, DISPATCH_METHOD,
-    DispParams, nil, nil, nil);
-  {$ENDIF}
-  T := FindTracker(Self);
-  if Assigned(T) then
-  begin
-    T.Suppress := False;
-    // Do not reserialize the RTF baseline here: this method runs during
-    // active spell-check processing, and a full RTF snapshot on a large
-    // document can stall the UI for seconds. Mark the baseline as stale
-    // instead; the debounce timer refreshes it once the user stops
-    // interacting.
-    T.MarkBaselineStale;
-  end;
 end;
 
 procedure TRichMemoHelper.SetLeftIndent(AIndentPixels: integer = 3);
@@ -2136,7 +2398,21 @@ begin
     Self.ResetParaSpacing;
 end;
 
+{%EndRegion}
+
+{%Region -fold Finalization}
+
 finalization
+  if Assigned(GSmartSelections) then
+  begin
+    while GSmartSelections.Count > 0 do
+    begin
+      TRichMemoSmartSelection(GSmartSelections[0]).Free;
+      GSmartSelections.Delete(0);
+    end;
+    FreeAndNil(GSmartSelections);
+  end;
+
   if Assigned(GTrackers) then
   begin
     while GTrackers.Count > 0 do
@@ -2146,5 +2422,7 @@ finalization
     end;
     FreeAndNil(GTrackers);
   end;
+
+  {%EndRegion}
 
 end.
