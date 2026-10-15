@@ -666,7 +666,6 @@ begin
   // Stop timer and cleanup
   FTimer.Enabled := False;
 
-  // Restore original event handlers if our popup is still attached
   if FIsShowingOurMenu and (FTargetPopupMenu <> nil) then
   begin
     FTargetPopupMenu.OnPopup := FOriginalPopupOnPopup;
@@ -677,7 +676,12 @@ begin
   ClearInjectedItems;
   FreeAndNil(FTimer);
   FreeAndNil(FInjectedItems);
+
+  // Detach the memo before Clear so ClearUnderlines does not touch a memo
+  // that may be in the middle of its own destruction sequence
+  FRichMemo := nil;
   Clear;
+
   FreeAndNil(FMenu);
   FreeAndNil(FErrors);
   inherited Destroy;
