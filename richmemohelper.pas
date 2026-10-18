@@ -2370,6 +2370,9 @@ begin
   if Self.ReadOnly then Exit;
 
   TextLen := Length(UTF8ToUTF16(Self.Text));
+
+  // Hide the intermediate "select all" state from the user
+  Self.LockRedraw;
   BeginUndoBatch;
   try
     // Select all text
@@ -2384,6 +2387,8 @@ begin
     Self.SelLength := 0;
   finally
     EndUndoBatch;
+    // Resume painting and redraw only the final empty state
+    Self.UnlockRedraw;
   end;
   PushUndoSnapshot;
 end;
