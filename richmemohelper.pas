@@ -173,15 +173,15 @@ uses
   HtmlToRtf,
   {$IFDEF WINDOWS}
   RtfToHtml,
-  clipboardhelper,
+  ClipboardHelper,
   {$ENDIF}
   {$IFDEF LCLGTK2}
   gtk2,
   glib2,
   {$ENDIF}
   ClipToHtml,
-  stringhelper,
-  controlshelper;
+  StringHelper,
+  ControlsHelper;
 
   {%Region -fold Windows helpers}
   {$IFDEF WINDOWS}

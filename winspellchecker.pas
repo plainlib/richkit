@@ -130,7 +130,7 @@ procedure ResetSupportedLanguagesCache;
 
 implementation
 
-uses localize;
+uses Localize;
 
   {$IFDEF WINDOWS}
 
