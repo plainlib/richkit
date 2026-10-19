@@ -8,6 +8,8 @@
       <Version Value="11"/>
       <PathDelim Value="\"/>
       <SearchPaths>
+        <IncludeFiles Value="src"/>
+        <OtherUnitFiles Value="src"/>
         <UnitOutputDirectory Value="lib\$(TargetCPU)-$(TargetOS)"/>
       </SearchPaths>
       <Linking>
@@ -46,55 +48,51 @@ SOFTWARE."/>
     <Version Major="1"/>
     <Files>
       <Item>
-        <Filename Value="richmemocelleditor.pas"/>
+        <Filename Value="src\richmemocelleditor.pas"/>
         <UnitName Value="RichMemoCellEditor"/>
       </Item>
       <Item>
-        <Filename Value="cliptohtml.pas"/>
+        <Filename Value="src\cliptohtml.pas"/>
         <UnitName Value="ClipToHtml"/>
       </Item>
       <Item>
-        <Filename Value="htmltortf.pas"/>
+        <Filename Value="src\htmltortf.pas"/>
         <UnitName Value="HtmlToRtf"/>
       </Item>
       <Item>
-        <Filename Value="richkit.pas"/>
-        <UnitName Value="richkit"/>
-      </Item>
-      <Item>
-        <Filename Value="richmemohelper.pas"/>
+        <Filename Value="src\richmemohelper.pas"/>
         <UnitName Value="RichMemoHelper"/>
       </Item>
       <Item>
-        <Filename Value="richspellchecker.pas"/>
+        <Filename Value="src\richspellchecker.pas"/>
         <UnitName Value="RichSpellChecker"/>
       </Item>
       <Item>
-        <Filename Value="rtftohtml.pas"/>
+        <Filename Value="src\rtftohtml.pas"/>
         <UnitName Value="RtfToHtml"/>
       </Item>
       <Item>
-        <Filename Value="spellutils.pas"/>
+        <Filename Value="src\spellutils.pas"/>
         <UnitName Value="SpellUtils"/>
       </Item>
       <Item>
-        <Filename Value="winspellchecker.pas"/>
+        <Filename Value="src\winspellchecker.pas"/>
         <UnitName Value="WinSpellChecker"/>
       </Item>
       <Item>
-        <Filename Value="hunspellchecker.pas"/>
+        <Filename Value="src\hunspellchecker.pas"/>
         <UnitName Value="HunSpellChecker"/>
       </Item>
     </Files>
     <RequiredPkgs>
       <Item>
+        <PackageName Value="LCLBase"/>
+      </Item>
+      <Item>
         <PackageName Value="helpers"/>
       </Item>
       <Item>
         <PackageName Value="richmemopackage"/>
-      </Item>
-      <Item>
-        <PackageName Value="LCLBase"/>
       </Item>
     </RequiredPkgs>
     <UsageOptions>

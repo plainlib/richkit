@@ -18,6 +18,8 @@ uses
   Controls,
   ExtCtrls,
   LMessages,
+  LCLIntf,
+  LCLType,
   Grids,
   RichMemo;
 
@@ -54,10 +56,6 @@ type
   end;
 
 implementation
-
-uses
-  LCLIntf,
-  LCLType;
 
 const
   // The GTK widgetset imposes a minimum height on TRichMemo, so the memo
