@@ -69,6 +69,10 @@ type
     // EndUpdate to avoid redrawing the entire accumulated error list on
     // every incremental update, which would be O(N^2) across many chunks.
     procedure ApplyUnderlinesFrom(AStartIndex: integer);
+    // Clear underline formatting from the given range without changing
+    // the error list. Used to strip an underline that RichMemo inherited
+    // for characters typed right after an underlined word.
+    procedure ClearUnderlineRange(AOffset, ALength: integer);
     function ShowContextMenu(X, Y: integer): boolean;
     procedure ReplaceError(AError: PSpellError; const ANewText: string; NewCaretPos: integer = -1);
     // Remove a single error from the list and clear its underline
@@ -771,6 +775,95 @@ begin
   if AError = nil then
     Exit;
   DrawSpellUnderline(FRichMemo, AError^.Offset, AError^.Length, AError^.Color);
+end;
+
+procedure TRichSpellChecker.ClearUnderlineRange(AOffset, ALength: integer);
+{$IFDEF WINDOWS}
+var
+  OldSelStart, OldSelLength: integer;
+  scrollPos: TPoint;
+  cf: CHARFORMAT2W;
+  cr: CHARRANGE;
+{$ELSE}
+var
+  OldSelStart, OldSelLength: integer;
+{$ENDIF}
+begin
+  if not Assigned(FRichMemo) or (ALength <= 0) or (AOffset < 0) then
+    Exit;
+  {$IFDEF WINDOWS}
+  // Save caret and scroll positions
+  OldSelStart := FRichMemo.SelStart;
+  OldSelLength := FRichMemo.SelLength;
+  {$HINTS OFF}
+  SendMessage(FRichMemo.Handle, EM_GETSCROLLPOS, 0, LPARAM(PtrInt(@scrollPos)));
+  {$HINTS ON}
+
+  // Formatting is service level, keep it out of the undo tracker
+  FRichMemo.SuspendUndo;
+  try
+    // Select the range and clear underline formatting
+    cr.cpMin := AOffset;
+    cr.cpMax := AOffset + ALength;
+    {$HINTS OFF}
+    SendMessage(FRichMemo.Handle, EM_EXSETSEL, 0, LPARAM(PtrInt(@cr)));
+    {$HINTS ON}
+
+    cf := Default(CHARFORMAT2W);
+    cf.cbSize := SizeOf(cf);
+    cf.dwMask := CFM_UNDERLINE or CFM_UNDERLINETYPE or CFM_UNDERLINECOLOR or CFM_COLOR;
+    cf.dwEffects := 0;
+    cf.bUnderlineType := CFU_UNDERLINENONE;
+    cf.bUnderlineColor := 0;
+    cf.crTextColor := GetSysColor(COLOR_WINDOWTEXT);
+
+    {$HINTS OFF}
+    SendMessage(FRichMemo.Handle, EM_SETCHARFORMAT, SCF_SELECTION, LPARAM(PtrInt(@cf)));
+    {$HINTS ON}
+
+    // Restore caret and scroll positions
+    FRichMemo.SelStart := OldSelStart;
+    FRichMemo.SelLength := OldSelLength;
+    {$HINTS OFF}
+    SendMessage(FRichMemo.Handle, EM_SETSCROLLPOS, 0, LPARAM(PtrInt(@scrollPos)));
+    {$HINTS ON}
+  finally
+    FRichMemo.ResumeUndo;
+  end;
+  {$ELSE}
+  // On GTK and macOS remove underline through SetRangeParams
+  OldSelStart := FRichMemo.SelStart;
+  OldSelLength := FRichMemo.SelLength;
+  FRichMemo.SuspendUndo;
+  try
+    GtkBeginBatch(FRichMemo);
+    try
+      FRichMemo.Lines.BeginUpdate;
+      try
+        FRichMemo.SetRangeParams(
+          AOffset,
+          ALength,
+          [tmm_Styles, tmm_Color],
+          '',
+          0,
+          clWindowText,
+          [],
+          []
+          );
+      finally
+        if FRichMemo.SelStart <> OldSelStart then
+          FRichMemo.SelStart := OldSelStart;
+        if FRichMemo.SelLength <> OldSelLength then
+          FRichMemo.SelLength := OldSelLength;
+        FRichMemo.Lines.EndUpdate;
+      end;
+    finally
+      GtkEndBatch(FRichMemo);
+    end;
+  finally
+    FRichMemo.ResumeUndo;
+  end;
+  {$ENDIF}
 end;
 
 procedure TRichSpellChecker.ApplyUnderlines;
