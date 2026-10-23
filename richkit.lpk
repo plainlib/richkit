@@ -3,6 +3,7 @@
   <Package Version="5">
     <PathDelim Value="\"/>
     <Name Value="richkit"/>
+    <Type Value="RunAndDesignTime"/>
     <Author Value="Alexander Tverskoy (astverskoy@gmail.com)"/>
     <CompilerOptions>
       <Version Value="11"/>
@@ -83,6 +84,15 @@ SOFTWARE."/>
         <Filename Value="src\hunspellchecker.pas"/>
         <UnitName Value="HunSpellChecker"/>
       </Item>
+      <Item>
+        <Filename Value="src\spellchecker.pas"/>
+        <UnitName Value="SpellChecker"/>
+      </Item>
+      <Item>
+        <Filename Value="richkitregister.pas"/>
+        <HasRegisterProc Value="True"/>
+        <UnitName Value="RichKitRegister"/>
+      </Item>
     </Files>
     <RequiredPkgs>
       <Item>
@@ -90,6 +100,9 @@ SOFTWARE."/>
       </Item>
       <Item>
         <PackageName Value="helpers"/>
+      </Item>
+      <Item>
+        <PackageName Value="toolkit"/>
       </Item>
       <Item>
         <PackageName Value="richmemopackage"/>
