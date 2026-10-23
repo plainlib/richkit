@@ -151,7 +151,7 @@ The property has no effect while `Enabled` is `False`.
 
 For a simplified integration, you can use the non‑visual `TSpellChecker` component. It provides a ready-to-use drop-in solution that handles the spell checker lifecycle and event wiring, so you can focus on your application logic.
 
-![SpellCheckSample](samples/sample-spellcheck.png)  
+![sample_richkit](img/sample-richkit.png)
 
 ## Requirements
 
