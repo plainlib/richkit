@@ -2105,8 +2105,14 @@ begin
   // its completion callback will notice the generation mismatch and reload.
   Inc(FLoadGeneration);
 
-  // If an async load is already running, let it finish first
-  if FLoadingDictionary then Exit;
+  // If an async load is already running, request its cancellation so it
+  // aborts quickly. OnHunDictionaryLoaded will notice the generation
+  // mismatch and restart with the current parameters.
+  if FLoadingDictionary then
+  begin
+    InterlockedExchange(FCancelRequested, 1);
+    Exit;
+  end;
 
   // If a background check is running, defer the reload instead of blocking
   // the main thread. OnBackgroundDone will re-enter this method when the
@@ -2177,6 +2183,11 @@ procedure TSpellChecker.StartAsyncDictionaryLoadFromFiles(const AFFFile, DICFile
 begin
   if FLoadingDictionary then Exit; // Guard, should not happen
 
+  // Clear any cancellation signal left over from an earlier suggestion
+  // pass or from a superseded load, so this fresh load is not aborted
+  // before it even begins
+  InterlockedExchange(FCancelRequested, 0);
+
   // Discard leftovers from a previous load
   FreeAndNil(FLoadAffStream);
   FreeAndNil(FLoadDicStream);
@@ -2195,6 +2206,9 @@ end;
 procedure TSpellChecker.StartAsyncDictionaryLoadFromStream(AFFStream, DICStream: TStream);
 begin
   if FLoadingDictionary then Exit; // Guard, should not happen
+
+  // Same as the file based loader: drop any stale cancellation signal
+  InterlockedExchange(FCancelRequested, 0);
 
   // Discard leftovers from a previous load
   FreeAndNil(FLoadAffStream);
@@ -2226,6 +2240,10 @@ procedure TSpellChecker.DoLoadHunDictionary;
 begin
   // This method runs in a background thread, do not touch UI here
   FLocalChecker := THunSpellChecker.Create;
+  // Share the cancellation flag with the parser, so LoadAFF/LoadDIC can
+  // abort early when the caller requested a cancellation (for example
+  // because the language was switched while the load was running)
+  FLocalChecker.CancelFlag := @FCancelRequested;
   try
     if Assigned(FLoadAffStream) then
       FLoadSuccess := FLocalChecker.LoadFromStream(FLoadAffStream, FLoadDicStream)
@@ -2242,6 +2260,10 @@ procedure TSpellChecker.OnHunDictionaryLoaded;
 begin
   // This method runs in the main thread after DoLoadHunDictionary completes
   FLoadingDictionary := False;
+
+  // Clear any cancellation signal issued while the load was running, so a
+  // pending reload or a fresh check does not inherit it and abort itself
+  InterlockedExchange(FCancelRequested, 0);
 
   // Free temporary streams used for stream based loading
   FreeAndNil(FLoadAffStream);
@@ -2264,19 +2286,34 @@ begin
     Exit;
   end;
 
-  // Discard a failed load
+  // Reload when the parameters changed or the previous load was cancelled.
+  // This check must run before the success/failure branch, because a
+  // cancelled load reports FLoadSuccess = False and would otherwise be
+  // silently dropped instead of restarted for the new language
+  if FLoadingGeneration <> FLoadGeneration then
+  begin
+    if Assigned(FLocalChecker) then
+      FreeAndNil(FLocalChecker);
+    FDictionaryPendingAction := dpaNone;
+    LoadHunDictionaryForLanguage;
+    Exit;
+  end;
+
+  // Handle a deferred reload requested while a background check was running
+  if FDictionaryPendingAction = dpaReload then
+  begin
+    FDictionaryPendingAction := dpaNone;
+    if Assigned(FLocalChecker) then
+      FreeAndNil(FLocalChecker);
+    LoadHunDictionaryForLanguage;
+    Exit;
+  end;
+
+  // Discard a failed load that has no pending retry
   if not FLoadSuccess or not Assigned(FLocalChecker) then
   begin
     if Assigned(FLocalChecker) then
       FreeAndNil(FLocalChecker);
-    Exit;
-  end;
-
-  // If the load parameters changed while loading, discard the result and reload
-  if FLoadingGeneration <> FLoadGeneration then
-  begin
-    FreeAndNil(FLocalChecker);
-    LoadHunDictionaryForLanguage;
     Exit;
   end;
 

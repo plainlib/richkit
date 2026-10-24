@@ -1702,6 +1702,8 @@ begin
 
     while LineIdx < Lines.Count do
     begin
+      if (FCancelFlag <> nil) and (FCancelFlag^ <> 0) then
+        raise EAbort.Create('Dictionary load cancelled');
       Line := StripComment(Lines[LineIdx]);
       Line := Trim(Line);
       Inc(LineIdx);
@@ -2264,6 +2266,8 @@ begin
     LineIdx := 1;
     while LineIdx < Lines.Count do
     begin
+      if (FCancelFlag <> nil) and (FCancelFlag^ <> 0) then
+        raise EAbort.Create('Dictionary load cancelled');
       Line := Trim(Lines[LineIdx]);
       Inc(LineIdx);
       if Line = '' then Continue;
@@ -2555,6 +2559,9 @@ var
   FlatS: TFlatSuffixRule;
   FlatP: TFlatPrefixRule;
 begin
+  if (FCancelFlag <> nil) and (FCancelFlag^ <> 0) then
+    raise EAbort.Create('Dictionary load cancelled');
+
   // Shrink first so the flat tables are built on exact sizes
   ShrinkAffixGroups;
 
@@ -4074,6 +4081,8 @@ begin
 
   for i := 0 to FWordCount - 1 do
   begin
+    if (FCancelFlag <> nil) and (FCancelFlag^ <> 0) then
+      raise EAbort.Create('Dictionary load cancelled');
     FAllWords[i] := FWords[i].word;
     FAllWordsLower[i] := UTF8LowerCase(FAllWords[i]);
     FAllWordsLowerWide[i] := UTF8Decode(FAllWordsLower[i]);
