@@ -1985,7 +1985,7 @@ begin
     if Self.WordWrap then
     begin
       // Logical width is the physical width divided by zoom factor
-      LogicalWidth := Round((Self.ClientWidth - GetSystemMetrics(SM_CXVSCROLL) - 4) / Self.ZoomFactor);
+      LogicalWidth := Round((Self.ClientWidth - GetSystemMetrics(SM_CXVSCROLL) - Self.Scale96ToForm(4)) / Self.ZoomFactor);
       TextRect := Types.Rect(0, 0, LogicalWidth, 0);
     end
     else
@@ -2014,6 +2014,7 @@ var
   TextMetric: TTextMetric;
   Bmp: Graphics.TBitmap;
   LineHeightTwips: LongInt;
+  DC: HDC;
 {$ELSE}
 var
   ParaMetric: TParaMetric;
@@ -2035,8 +2036,14 @@ begin
     Bmp.Free;
   end;
 
-  // Convert font height to twips (1 pixel = 15 twips at 96 DPI)
-  LineHeightTwips := TextMetric.tmHeight * 15;
+  // Convert font height from pixels to twips using the actual screen DPI,
+  // one inch equals 1440 twips, so the divisor is LOGPIXELSY not 96
+  DC := GetDC(0);
+  try
+    LineHeightTwips := MulDiv(TextMetric.tmHeight, 1440, GetDeviceCaps(DC, LOGPIXELSY));
+  finally
+    ReleaseDC(0, DC);
+  end;
 
   FillChar(ParaFormat2, SizeOf(ParaFormat2), 0);
   ParaFormat2.cbSize := SizeOf(ParaFormat2);
@@ -2396,8 +2403,9 @@ end;
 procedure TRichMemoHelper.UpdateState(AIndentPixels: integer = 3; AResetParaSpacing: boolean = False);
 begin
   if not Self.Visible then Exit;
+  // The default 3 is a design pixel value, scale it before passing on
   if AIndentPixels > 1 then
-    Self.SetLeftIndent(AIndentPixels);
+    Self.SetLeftIndent(Self.Scale96ToForm(AIndentPixels));
   Self.ApplyBidiMode;
   if AResetParaSpacing then
     Self.ResetParaSpacing;
