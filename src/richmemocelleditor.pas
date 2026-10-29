@@ -101,19 +101,35 @@ procedure TRichMemoCellEditor.ApplyCellBounds;
 var
   MemoWidth: integer;
   MemoHeight: integer;
+  LeftInset: integer;
+  TopInset: integer;
+  RightInset: integer;
+  BottomInset: integer;
 begin
   if not FCellRectSet or (FHost = nil) or (FHost.Parent = nil) then
     Exit;
 
+  // Insets match the text drawing in MainUnit.GridDrawCell: 3px on the
+  // left and top, 2px on the right and bottom. On GTK2 GtkTextView has no
+  // internal text padding, so the host is shifted 1px right there to line
+  // up with the drawn text (RichEdit adds that padding on Windows itself)
+  LeftInset := Scale96ToForm(2);
+  {$IFDEF LCLGTK2}
+  Inc(LeftInset, Scale96ToForm(1));
+  {$ENDIF}
+  TopInset := Scale96ToForm(3);
+  RightInset := Scale96ToForm(2);
+  BottomInset := Scale96ToForm(2);
+
   FHost.SetBounds(
-    FCellRect.Left + 2,
-    FCellRect.Top + 3,
-    FCellRect.Right - FCellRect.Left - 3,
-    FCellRect.Bottom - FCellRect.Top - 1
+    FCellRect.Left + LeftInset,
+    FCellRect.Top + TopInset,
+    FCellRect.Right - FCellRect.Left - LeftInset - RightInset,
+    FCellRect.Bottom - FCellRect.Top - TopInset - BottomInset
     );
 
-  MemoWidth := FCellRect.Right - FCellRect.Left - 3;
-  MemoHeight := FCellRect.Bottom - FCellRect.Top - 1;
+  MemoWidth := FHost.Width;
+  MemoHeight := FHost.Height;
 
   if MemoHeight < MinMemoHeight then
     MemoHeight := MinMemoHeight;
@@ -300,9 +316,13 @@ begin
   // Get the mouse position in grid coordinates.
   GridPoint := FGrid.ScreenToClient(Mouse.CursorPos);
 
-  // Convert the mouse position from grid coordinates to memo coordinates.
-  P.X := GridPoint.X - FCellRect.Left - 2;
-  P.Y := GridPoint.Y - FCellRect.Top - 3;
+  // Convert the mouse position from grid coordinates to memo coordinates
+  // using the same insets that ApplyCellBounds used to place the host
+  P.X := GridPoint.X - FCellRect.Left - Scale96ToForm(2);
+  {$IFDEF LCLGTK2}
+  Dec(P.X, Scale96ToForm(1));
+  {$ENDIF}
+  P.Y := GridPoint.Y - FCellRect.Top - Scale96ToForm(3);
 
   if PtInRect(ClientRect, P) then
   begin
