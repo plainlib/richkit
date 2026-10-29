@@ -610,15 +610,19 @@ begin
   if n = 'ISO885915' then Exit(ISO_8859_15ToUTF8(S));
   if n = 'ISO885916' then Exit(ISO_8859_16ToUTF8(S));
   if n = 'KOI8R' then Exit(KOI8RToUTF8(S));
-  if n = 'CP1250' then Exit(CP1250ToUTF8(S));
-  if n = 'CP1251' then Exit(CP1251ToUTF8(S));
-  if n = 'CP1252' then Exit(CP1252ToUTF8(S));
-  if n = 'CP1253' then Exit(CP1253ToUTF8(S));
-  if n = 'CP1254' then Exit(CP1254ToUTF8(S));
-  if n = 'CP1255' then Exit(CP1255ToUTF8(S));
-  if n = 'CP1256' then Exit(CP1256ToUTF8(S));
-  if n = 'CP1257' then Exit(CP1257ToUTF8(S));
-  if n = 'CP1258' then Exit(CP1258ToUTF8(S));
+  // Windows codepages may be spelled as the IANA canonical name
+  // (windows-1251), the short form (cp1251) or the Microsoft IANA
+  // alias (microsoft-cp1251). After normalization they all collapse
+  // to the same token, so accept every spelling here
+  if (n = 'CP1250') or (n = 'WINDOWS1250') or (n = 'MICROSOFTCP1250') then Exit(CP1250ToUTF8(S));
+  if (n = 'CP1251') or (n = 'WINDOWS1251') or (n = 'MICROSOFTCP1251') then Exit(CP1251ToUTF8(S));
+  if (n = 'CP1252') or (n = 'WINDOWS1252') or (n = 'MICROSOFTCP1252') then Exit(CP1252ToUTF8(S));
+  if (n = 'CP1253') or (n = 'WINDOWS1253') or (n = 'MICROSOFTCP1253') then Exit(CP1253ToUTF8(S));
+  if (n = 'CP1254') or (n = 'WINDOWS1254') or (n = 'MICROSOFTCP1254') then Exit(CP1254ToUTF8(S));
+  if (n = 'CP1255') or (n = 'WINDOWS1255') or (n = 'MICROSOFTCP1255') then Exit(CP1255ToUTF8(S));
+  if (n = 'CP1256') or (n = 'WINDOWS1256') or (n = 'MICROSOFTCP1256') then Exit(CP1256ToUTF8(S));
+  if (n = 'CP1257') or (n = 'WINDOWS1257') or (n = 'MICROSOFTCP1257') then Exit(CP1257ToUTF8(S));
+  if (n = 'CP1258') or (n = 'WINDOWS1258') or (n = 'MICROSOFTCP1258') then Exit(CP1258ToUTF8(S));
   // ISO-8859-6, ISO-8859-8, ISO-8859-11 and KOI8-U have no dedicated helper in LConvEncoding
   // and are not required for the currently supported dictionaries. The string is returned as is.
 end;
