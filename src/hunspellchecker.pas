@@ -2347,6 +2347,13 @@ begin
       end;
 
       HashAdd(word, FlagsArr);
+
+      // Yield the CPU every few hundred words so the main thread stays
+      // responsive under a debugger with heaptrc, where every allocation
+      // is much slower and the loading thread would otherwise hog the
+      // processor for the entire dictionary scan
+      if (LineIdx mod 1000) = 0 then
+        Sleep(0);
     end;
   finally
     Lines.Free;
@@ -4093,6 +4100,11 @@ begin
     FAllWordsFirstChar[i] := FirstCodepoint(FAllWordsLower[i]);
     Len := UTF8Length(FAllWords[i]);
     if Len > MaxLen then MaxLen := Len;
+
+    // Yield the CPU periodically to keep the UI responsive during the
+    // very allocation-heavy lowercase and wide decoding pass
+    if (i mod 1000) = 0 then
+      Sleep(0);
   end;
 
   SetLength(FLengthBuckets, MaxLen + 1);
