@@ -164,6 +164,7 @@ begin
     FInternalParent := False;
   end;
 
+  ParentFont := True;
   ApplyCellBounds;
   ApplyPendingValue;
 end;
