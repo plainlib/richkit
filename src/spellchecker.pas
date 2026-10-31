@@ -64,6 +64,8 @@ type
     FAutoApply: boolean;
     FAutoContextMenu: boolean;
     FMemoChangeOnReplace: boolean;
+    FAllowAddToDictionary: boolean;
+    FAddToDictionaryCaption: TCaption;
     FOnSpellCheckComplete: TSpellCheckCompleteEvent;
     FOnContextPopup: TSpellContextPopupEvent; // optional user hook
     FOnReplace: TSpellReplaceEvent;           // fired after a replacement from the menu
@@ -142,6 +144,8 @@ type
     procedure SetOptions(AValue: TSpellCheckOptions);
     procedure SetAutoContextMenu(AValue: boolean);
     procedure SetMemoChangeOnReplace(AValue: boolean);
+    procedure SetAllowAddToDictionary(AValue: boolean);
+    procedure SetAddToDictionaryCaption(const AValue: TCaption);
     procedure SetPopupMenu(AValue: TPopupMenu);
     procedure SetUseSubMenu(AValue: boolean);
     procedure SetSuggestionsCaption(const AValue: string);
@@ -174,6 +178,7 @@ type
     procedure ApplyErrors(const AErrors: RichSpellChecker.TSpellErrorArray);
     procedure ClearUnderlines;
     procedure DoSpellCheckNeeded(Sender: TObject);
+    procedure DoAddToDictionary(Sender: TObject; const word: string; AOffset, ALength: integer);
     procedure LoadHunDictionaryForLanguage;
     procedure StartAsyncDictionaryLoadFromFiles(const AFFFile, DICFile: string);
     procedure StartAsyncDictionaryLoadFromStream(AFFStream, DICStream: TStream);
@@ -268,6 +273,16 @@ type
     // suggestions menu. When False (default), OnChange is suppressed during
     // the replacement to avoid reentrant spell checking.
     property MemoChangeOnReplace: boolean read FMemoChangeOnReplace write SetMemoChangeOnReplace default False;
+
+    // When True, the context menu shows an "Add to dictionary" item. The
+    // Hunspell engine appends the word to the loaded .dic file when possible,
+    // the Windows engine stores it in the per-user system dictionary.
+    property AllowAddToDictionary: boolean read FAllowAddToDictionary write SetAllowAddToDictionary default False;
+
+    // Caption of the "Add to dictionary" menu item. Defaults to English, so
+    // the component can stay untranslated while applications that need a
+    // localized menu override the string here.
+    property AddToDictionaryCaption: TCaption read FAddToDictionaryCaption write SetAddToDictionaryCaption;
 
     // External PopupMenu to integrate suggestions into (if nil, use default behavior)
     property PopupMenu: TPopupMenu read FPopupMenu write SetPopupMenu;
@@ -411,6 +426,8 @@ begin
   FAutoApply := True;
   FAutoContextMenu := True;
   FMemoChangeOnReplace := False;
+  FAllowAddToDictionary := False;
+  FAddToDictionaryCaption := 'Add To Dictionary';
   FChecking := False;
   FPendingCheck := False;
   FInternalChange := False;
@@ -709,6 +726,9 @@ begin
     FSpellChecker.SubMenuCaption := FSubMenuCaption;
     FSpellChecker.SubMenuIndex := FSubMenuIndex;
     FSpellChecker.MemoChangeOnReplace := FMemoChangeOnReplace;
+    FSpellChecker.AllowAddToDictionary := FAllowAddToDictionary;
+    FSpellChecker.AddToDictionaryCaption := FAddToDictionaryCaption;
+    FSpellChecker.OnAddToDictionary := @DoAddToDictionary;
 
     if ReuseErrors then
     begin
@@ -867,6 +887,26 @@ begin
     FMemoChangeOnReplace := AValue;
     if Assigned(FSpellChecker) then
       FSpellChecker.MemoChangeOnReplace := AValue;
+  end;
+end;
+
+procedure TSpellChecker.SetAllowAddToDictionary(AValue: boolean);
+begin
+  if FAllowAddToDictionary <> AValue then
+  begin
+    FAllowAddToDictionary := AValue;
+    if Assigned(FSpellChecker) then
+      FSpellChecker.AllowAddToDictionary := AValue;
+  end;
+end;
+
+procedure TSpellChecker.SetAddToDictionaryCaption(const AValue: TCaption);
+begin
+  if FAddToDictionaryCaption <> AValue then
+  begin
+    FAddToDictionaryCaption := AValue;
+    if Assigned(FSpellChecker) then
+      FSpellChecker.AddToDictionaryCaption := AValue;
   end;
 end;
 
@@ -2089,6 +2129,49 @@ procedure TSpellChecker.ClearUnderlines;
 begin
   if Assigned(FSpellChecker) then
     FSpellChecker.Clear;
+end;
+
+procedure TSpellChecker.DoAddToDictionary(Sender: TObject; const word: string; AOffset, ALength: integer);
+var
+  i: integer = 0;
+begin
+  if word = '' then Exit;
+
+  if FEngine = seHunspell then
+  begin
+    // FLoadDicFile holds the path used for the last file-based load. It is
+    // empty when the dictionary was loaded from a stream, in which case the
+    // word is only added to the in-memory dictionary
+    if Assigned(FHunSpellChecker) then
+      FHunSpellChecker.AddWord(word, FLoadDicFile);
+  end
+  else if FEngine = seWindows then
+  begin
+    {$IFDEF WINDOWS}
+    // Word is a UTF-8 AnsiString, AddWordToDictionary expects UTF-16
+    WinSpellChecker.AddWordToDictionary(UTF8Decode(Word), FLanguage);
+    {$ENDIF}
+  end;
+
+  // Drop the clicked error from the snapshot so the next redraw of the
+  // underline list does not include it
+  for i := High(FLastErrors) downto 0 do
+    if (FLastErrors[i].Offset = AOffset) and (FLastErrors[i].Length = ALength) then
+    begin
+      Delete(FLastErrors, i, 1);
+      Break;
+    end;
+
+  // Redraw the remaining underlines without triggering a real check
+  if Assigned(FRichMemo) then
+  begin
+    FInternalChange := True;
+    try
+      ApplyErrorsTo(FRichMemo);
+    finally
+      FInternalChange := False;
+    end;
+  end;
 end;
 
 procedure TSpellChecker.LoadHunDictionaryForLanguage;

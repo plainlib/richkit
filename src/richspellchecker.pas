@@ -11,7 +11,7 @@ unit RichSpellChecker;
 interface
 
 uses
-  Classes, SysUtils, Menus, Graphics, Types, ExtCtrls, RichMemo, RichMemoHelper;
+  Classes, SysUtils, Menus, Graphics, Types, ExtCtrls, LazUTF8, RichMemo, RichMemoHelper;
 
 type
   TSpellCheckOption = (scoSpelling, scoComprehensiveSpelling);
@@ -26,6 +26,8 @@ type
   end;
   PSpellError = ^TSpellError;
   TSpellErrorArray = array of TSpellError;
+
+  TAddToDictionaryEvent = procedure(Sender: TObject; const word: string; AOffset, ALength: integer) of object;
 
   TRichSpellChecker = class
   private
@@ -47,11 +49,15 @@ type
     FOriginalPopupOnPopup: TNotifyEvent; // saved original OnPopup handler
     FOriginalPopupOnClose: TNotifyEvent; // saved original OnClose handler
     FMemoChangeOnReplace: boolean; // if True, do not block RichMemo.OnChange during replacement
+    FAllowAddToDictionary: boolean; // if True, show the "Add to dictionary" menu item
+    FAddToDictionaryCaption: string; // caption of the "Add to dictionary" menu item
+    FOnAddToDictionary: TAddToDictionaryEvent; // fired when the user picks "Add to dictionary"
     FTimer: TTimer; // delayed cleanup timer
     function GetErrorAtTextPos(ATextPos: integer): PSpellError;
     procedure ApplyUnderlineToError(AError: PSpellError);
     procedure ClearUnderlines;
     procedure ReplacementClick(Sender: TObject);
+    procedure AddToDictionaryClick(Sender: TObject);
     function GetCharIndexAtPos(X, Y: integer): integer;
     procedure ClearInjectedItems;
     procedure SetTargetPopupMenu(const AValue: TPopupMenu);
@@ -90,6 +96,12 @@ type
     // suggestions menu. When False (default), OnChange is temporarily cleared
     // to avoid reentrant spell checking.
     property MemoChangeOnReplace: boolean read FMemoChangeOnReplace write FMemoChangeOnReplace default False;
+    // When True, an "Add to dictionary" item is added to the suggestions menu
+    property AllowAddToDictionary: boolean read FAllowAddToDictionary write FAllowAddToDictionary default False;
+    // Caption of the "Add to dictionary" menu item
+    property AddToDictionaryCaption: string read FAddToDictionaryCaption write FAddToDictionaryCaption;
+    // Fired when the user picks "Add to dictionary" from the suggestions menu
+    property OnAddToDictionary: TAddToDictionaryEvent read FOnAddToDictionary write FOnAddToDictionary;
   end;
 
 // Batch-draws the given errors on ARichMemo. Existing underlines are not
@@ -658,6 +670,9 @@ begin
   FOriginalPopupOnPopup := nil;
   FOriginalPopupOnClose := nil;
   FMemoChangeOnReplace := False;
+  FAllowAddToDictionary := False;
+  FAddToDictionaryCaption := 'Add To Dictionary';
+  FOnAddToDictionary := nil;
 
   FTimer := TTimer.Create(nil);
   FTimer.Enabled := False;
@@ -1046,6 +1061,19 @@ begin
         Item.OnClick := @ReplacementClick;
         SMenu.Add(Item);
       end;
+      if FAllowAddToDictionary then
+      begin
+        if SMenu.Count > 0 then
+        begin
+          Item := TMenuItem.Create(SMenu);
+          Item.Caption := '-';
+          SMenu.Add(Item);
+        end;
+        Item := TMenuItem.Create(SMenu);
+        Item.Caption := FAddToDictionaryCaption;
+        Item.OnClick := @AddToDictionaryClick;
+        SMenu.Add(Item);
+      end;
       // Insert SMenu at specified index
       FTargetPopupMenu.Items.Insert(InsertIndex, SMenu);
       // Remember only the SMenu root for cleanup (children are freed automatically)
@@ -1067,6 +1095,14 @@ begin
       Item.Caption := '-';
       FTargetPopupMenu.Items.Insert(InsertIndex + High(Error^.Replacements) + 1, Item);
       FInjectedItems.Add(Item);
+      if FAllowAddToDictionary then
+      begin
+        Item := TMenuItem.Create(FTargetPopupMenu);
+        Item.Caption := FAddToDictionaryCaption;
+        Item.OnClick := @AddToDictionaryClick;
+        FTargetPopupMenu.Items.Insert(InsertIndex + High(Error^.Replacements) + 2, Item);
+        FInjectedItems.Add(Item);
+      end;
     end;
 
     // Save original event handlers and assign ours to manage cleanup timing
@@ -1089,6 +1125,19 @@ begin
       Item := TMenuItem.Create(FMenu);
       Item.Caption := Error^.Replacements[i];
       Item.OnClick := @ReplacementClick;
+      FMenu.Items.Add(Item);
+    end;
+    if FAllowAddToDictionary then
+    begin
+      if FMenu.Items.Count > 0 then
+      begin
+        Item := TMenuItem.Create(FMenu);
+        Item.Caption := '-';
+        FMenu.Items.Add(Item);
+      end;
+      Item := TMenuItem.Create(FMenu);
+      Item.Caption := FAddToDictionaryCaption;
+      Item.OnClick := @AddToDictionaryClick;
       FMenu.Items.Add(Item);
     end;
     if FMenu.Items.Count > 0 then
@@ -1167,6 +1216,27 @@ begin
     if SuppressOnChange then
       FRichMemo.OnChange := OldOnChange;
   end;
+end;
+
+procedure TRichSpellChecker.AddToDictionaryClick(Sender: TObject);
+var
+  word: string = '';
+  Offset: integer = 0;
+  Len: integer = 0;
+begin
+  if FCurrentError = nil then Exit;
+  if not Assigned(FRichMemo) then Exit;
+
+  Offset := FCurrentError^.Offset;
+  Len := FCurrentError^.Length;
+  word := UTF8Copy(FRichMemo.Text, Offset + 1, Len);
+
+  if Assigned(FOnAddToDictionary) then
+    FOnAddToDictionary(Self, word, Offset, Len);
+
+  // Remove the error from the internal list and clear its underline
+  RemoveError(FCurrentError, Len);
+  FCurrentError := nil;
 end;
 
 procedure TRichSpellChecker.ReplaceError(AError: PSpellError; const ANewText: string; NewCaretPos: integer);

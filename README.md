@@ -16,6 +16,7 @@
 - Chunked background checking of very large documents with incremental drawing of underlines, so errors appear at the top of the document while the rest is still being checked.
 - Option to check only the visible portion of the RichMemo (`CheckVisibleOnly`), with automatic re-check on scroll or text change. Works together with `ChunkedCheck`.
 - The chunked pass starts from the currently visible area, so the user sees fresh results where he is looking even when the document is scrolled far from the beginning.
+- Built‑in "Add to dictionary" item in the suggestions menu (`AllowAddToDictionary`). Hunspell appends the word to the loaded `.dic` file, the Windows engine stores it in the per‑user system dictionary.
 - Events: `OnSpellCheckComplete` (reports error count), `OnContextPopup` (allows custom handling).
 
 ### Key Properties
@@ -32,8 +33,9 @@
 | `AutoApply`            | `True`         | Automatically apply underlines after a check completes. |
 | `AutoContextMenu`      | `True`         | Automatically handle `OnContextPopup` to show suggestion menu. |
 | `MemoChangeOnReplace`  | `False`        | When `True`, `RichMemo.OnChange` fires when a word is replaced from the suggestions menu. When `False`, `OnChange` is suppressed during the replacement to avoid reentrant spell checking. |
-| `PopupMenu`            | `nil`          | An external `TPopupMenu` to integrate suggestions into (if `nil`, uses default behaviour). |
-| `SubMenu`              | `False`        | If `True`, suggestions are placed in a submenu. |
+| `AllowAddToDictionary` | `False`        | When `True`, the suggestions menu shows an "Add to dictionary" item. Hunspell appends the word to the loaded `.dic` file (when the dictionary was loaded from a file), the Windows engine persists it in the per‑user system dictionary. |
+| `AddToDictionaryCaption` | `'Add to dictionary'` | Caption of the "Add to dictionary" menu item. Override it in code or in the Object Inspector to localize the menu without translating the package. |
+| `PopupMenu`            | `nil`          | An external `TPopupMenu` to integrate suggestions into (if `nil`, uses default behaviour). || `SubMenu`              | `False`        | If `True`, suggestions are placed in a submenu. |
 | `SubMenuCaption`       | `'Suggestions'`| Caption of the submenu when `SubMenu` is `True`. |
 | `SubMenuIndex`         | `0`            | Index where suggestions (or submenu) are inserted in `PopupMenu`. |
 | `Engine`               | `seWindows`    | Spell engine: `seWindows` or `seHunspell`. |
@@ -87,6 +89,22 @@ Spell.PopupMenu := MyPopupMenu;
 Spell.SubMenu := False; // suggestions appear directly in the menu
 Spell.SubMenuIndex := 2; // insert after the second item
 ```
+
+### Adding words to the dictionary
+
+When `AllowAddToDictionary` is `True`, the suggestions menu gets an extra "Add to dictionary" item (separated from the suggestions). Picking it removes the underline for the clicked word immediately and teaches the engine the new word:
+
+- **Hunspell**: the word is added to the in‑memory dictionary, so it is recognized right away. If the dictionary was loaded from files (`LoadHunDictionaryFromFiles`, or an automatic download into `DicPath`), the word is also appended to the end of the corresponding `.dic` file, so it survives the next launch. The word count in the first line of the `.dic` file is not updated - Hunspell ignores it and the file remains valid. Dictionaries loaded from streams cannot be persisted and stay in memory only.
+- **Windows Spell Checker**: the word is added through `ISpellChecker.Add`, which stores it in the per‑user Windows dictionary (`%AppData%\Microsoft\Spelling\<lang>\default.dic`). It is picked up by the system on the next checker creation, so a restart of the application is not required, but other applications see the change only after they recreate their checker as well.
+
+The menu item is only shown when a misspelled word was actually clicked, and it works together with the internal menu, an external `PopupMenu`, and the `SubMenu` mode.
+
+```pascal
+Spell.AllowAddToDictionary := True;
+Spell.AddToDictionaryCaption := 'Add To Dictionary'; // optional localization
+```
+
+`AddToDictionaryCaption` defaults to English. The package itself is not translated, so applications that need a localized menu simply override this string - the same way `SubMenuCaption` is handled.
 
 ### Chunked checking of large documents
 

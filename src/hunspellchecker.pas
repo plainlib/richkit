@@ -328,6 +328,8 @@ type
     function CheckText(const Text: string): TSpellErrorArray;
     // Returns up to ten replacement candidates for the given misspelled word
     function Suggest(const word: string): TStringArray;
+    // Adds a word to the in-memory dictionary and optionally appends it to the source .dic file
+    function AddWord(const word: string; const DicFileName: string = ''): boolean;
     // When False, CheckText skips suggestion generation for speed
     property IncludeSuggestions: boolean read FIncludeSuggestions write FIncludeSuggestions;
     // Optional pointer to an external integer flag. When it is not nil and its
@@ -4704,4 +4706,46 @@ begin
     FSuggestCache.Add(CleanWord + '=' + CachedValue);
 end;
 
+function THunSpellChecker.AddWord(const word: string; const DicFileName: string = ''): boolean;
+var
+  Flags: TIntegerArray = nil;
+  Stream: TFileStream = nil;
+  Line: string = '';
+begin
+  Result := False;
+  if word = '' then Exit;
+
+  // Add the word to the in-memory hash table. Existing entries are merged,
+  // so adding the same word twice is safe
+  HashAdd(word, Flags);
+
+  // Rebuild the suggestion arrays so the new word participates in suggestions
+  BuildAllWordsArray;
+
+  // Invalidate the word-check cache so the new word is not treated as an error
+  CWCReset;
+
+  // Append the word to the .dic file when a file name is provided. The
+  // word count on the first line is not updated because Hunspell ignores
+  // it on load
+  if DicFileName <> '' then
+  begin
+    try
+      Stream := TFileStream.Create(DicFileName, fmOpenWrite or fmShareDenyNone);
+      try
+        Stream.Seek(0, soEnd);
+        Line := word + LineEnding;
+        Stream.WriteBuffer(Line[1], Length(Line));
+      finally
+        Stream.Free;
+      end;
+    except
+      // Ignore file write errors, the word remains available in memory
+    end;
+  end;
+
+  Result := True;
+end;
+
+end.
 end.

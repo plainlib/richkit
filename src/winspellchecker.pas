@@ -5,20 +5,20 @@
 //-----------------------------------------------------------------------------------
 //  Windows Spell Checker integration. Uses the system ISpellCheckerFactory
 //  to enumerate supported BCP-47 language tags and to check text.
-//
+
 //  Windows only ships a limited set of spell checking languages by default.
 //  If a language is missing from the supported list, its Language Features
 //  On Demand package must be installed. Run PowerShell as Administrator.
-//
+
 //  List all installed basic language capabilities:
 //    Get-WindowsCapability -Online | Where-Object { $_.Name -like "*Language.Basic*" }
-//
+
 //  Install a language (example for English US):
 //    Add-WindowsCapability -Online -Name "Language.Basic~~~en-US~0.0.1.0"
-//
+
 //  Remove a language:
 //    Remove-WindowsCapability -Online -Name "Language.Basic~~~en-US~0.0.1.0"
-//
+
 //  The en-US part is a BCP-47 tag and must match the tag reported by the
 //  spell checker. Replace it with the desired language, for example ru-RU,
 //  de-DE, fr-FR and so on. After installation the language becomes visible
@@ -125,6 +125,9 @@ function GetSupportedSpellCheckerLanguages: TSupportedLanguages;
 
 // Clears the cached language list so the next call re-reads it from Windows
 procedure ResetSupportedLanguagesCache;
+
+// Adds a word to the Windows user dictionary for the given language tag
+function AddWordToDictionary(const Word: widestring; const LanguageTag: string): boolean;
 
 {$ENDIF}
 
@@ -598,6 +601,31 @@ begin
       Exit;
     end;
   end;
+end;
+
+function AddWordToDictionary(const Word: widestring; const LanguageTag: string): boolean;
+var
+  factory: ISpellCheckerFactory = nil;
+  checker: ISpellChecker = nil;
+  hr: HRESULT;
+  NormalizedTag: widestring = '';
+begin
+  Result := False;
+  if Word = '' then Exit;
+
+  NormalizedTag := NormalizeLanguageTag(LanguageTag);
+  if NormalizedTag = '' then Exit;
+  if not IsLanguageSupported(NormalizedTag) then Exit;
+
+  hr := CoCreateInstance(CLSID_SpellCheckerFactory, nil, CLSCTX_INPROC_SERVER, ISpellCheckerFactory, factory);
+  if Failed(hr) then Exit;
+
+  hr := factory.CreateSpellChecker(pwidechar(NormalizedTag), checker);
+  if Failed(hr) then Exit;
+
+  // ISpellChecker.Add persists the word into the per-user Windows dictionary
+  hr := checker.Add(pwidechar(Word));
+  Result := Succeeded(hr);
 end;
 
   {$ENDIF}
