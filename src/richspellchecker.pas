@@ -1013,6 +1013,8 @@ var
   ScreenPoint: TPoint;
   InsertIndex: integer;
   SMenu: TMenuItem;
+  HasItemsAbove: boolean = False;
+  HasItemsBelow: boolean = False;
 begin
   Result := False;
   if not Assigned(FRichMemo) then
@@ -1074,34 +1076,96 @@ begin
         Item.OnClick := @AddToDictionaryClick;
         SMenu.Add(Item);
       end;
-      // Insert SMenu at specified index
-      FTargetPopupMenu.Items.Insert(InsertIndex, SMenu);
-      // Remember only the SMenu root for cleanup (children are freed automatically)
-      FInjectedItems.Add(SMenu);
+      // Skip an empty submenu together with its surrounding separators,
+      // otherwise the user would see a blank entry in his own menu
+      if SMenu.Count = 0 then
+        SMenu.Free
+      else
+      begin
+        // Decide about external separators before our own items are
+        // inserted, so the decision is based on user items only
+        HasItemsAbove := InsertIndex > 0;
+        HasItemsBelow := InsertIndex < FTargetPopupMenu.Items.Count;
+        // Separate the submenu from user items above it
+        if HasItemsAbove then
+        begin
+          Item := TMenuItem.Create(FTargetPopupMenu);
+          Item.Caption := '-';
+          FTargetPopupMenu.Items.Insert(InsertIndex, Item);
+          FInjectedItems.Add(Item);
+          Inc(InsertIndex);
+        end;
+        // Insert SMenu at specified index
+        FTargetPopupMenu.Items.Insert(InsertIndex, SMenu);
+        // Remember only the SMenu root for cleanup (children are freed automatically)
+        FInjectedItems.Add(SMenu);
+        Inc(InsertIndex);
+        // Separate the submenu from user items below it
+        if HasItemsBelow then
+        begin
+          Item := TMenuItem.Create(FTargetPopupMenu);
+          Item.Caption := '-';
+          FTargetPopupMenu.Items.Insert(InsertIndex, Item);
+          FInjectedItems.Add(Item);
+        end;
+      end;
     end
     else
     begin
-      // Insert replacement items directly at root
-      for i := 0 to High(Error^.Replacements) do
+      // Skip the whole injection when there is nothing to show, otherwise
+      // empty separators would end up in the user's menu
+      if (Length(Error^.Replacements) > 0) or FAllowAddToDictionary then
       begin
-        Item := TMenuItem.Create(FTargetPopupMenu);
-        Item.Caption := Error^.Replacements[i];
-        Item.OnClick := @ReplacementClick;
-        FTargetPopupMenu.Items.Insert(InsertIndex + i, Item);
-        FInjectedItems.Add(Item);
-      end;
-      // Add a separator after the items
-      Item := TMenuItem.Create(FTargetPopupMenu);
-      Item.Caption := '-';
-      FTargetPopupMenu.Items.Insert(InsertIndex + High(Error^.Replacements) + 1, Item);
-      FInjectedItems.Add(Item);
-      if FAllowAddToDictionary then
-      begin
-        Item := TMenuItem.Create(FTargetPopupMenu);
-        Item.Caption := FAddToDictionaryCaption;
-        Item.OnClick := @AddToDictionaryClick;
-        FTargetPopupMenu.Items.Insert(InsertIndex + High(Error^.Replacements) + 2, Item);
-        FInjectedItems.Add(Item);
+        // Same as in the submenu branch: decide about external separators
+        // before our own items are inserted
+        HasItemsAbove := InsertIndex > 0;
+        HasItemsBelow := InsertIndex < FTargetPopupMenu.Items.Count;
+        // Separate the injected block from user items above it
+        if HasItemsAbove then
+        begin
+          Item := TMenuItem.Create(FTargetPopupMenu);
+          Item.Caption := '-';
+          FTargetPopupMenu.Items.Insert(InsertIndex, Item);
+          FInjectedItems.Add(Item);
+          Inc(InsertIndex);
+        end;
+        // Insert replacement items directly at root
+        for i := 0 to High(Error^.Replacements) do
+        begin
+          Item := TMenuItem.Create(FTargetPopupMenu);
+          Item.Caption := Error^.Replacements[i];
+          Item.OnClick := @ReplacementClick;
+          FTargetPopupMenu.Items.Insert(InsertIndex, Item);
+          FInjectedItems.Add(Item);
+          Inc(InsertIndex);
+        end;
+        if FAllowAddToDictionary then
+        begin
+          // Separate "Add to dictionary" from the suggestions above it,
+          // but only when there are any suggestions to separate from
+          if Length(Error^.Replacements) > 0 then
+          begin
+            Item := TMenuItem.Create(FTargetPopupMenu);
+            Item.Caption := '-';
+            FTargetPopupMenu.Items.Insert(InsertIndex, Item);
+            FInjectedItems.Add(Item);
+            Inc(InsertIndex);
+          end;
+          Item := TMenuItem.Create(FTargetPopupMenu);
+          Item.Caption := FAddToDictionaryCaption;
+          Item.OnClick := @AddToDictionaryClick;
+          FTargetPopupMenu.Items.Insert(InsertIndex, Item);
+          FInjectedItems.Add(Item);
+          Inc(InsertIndex);
+        end;
+        // Separate the injected block from user items below it
+        if HasItemsBelow then
+        begin
+          Item := TMenuItem.Create(FTargetPopupMenu);
+          Item.Caption := '-';
+          FTargetPopupMenu.Items.Insert(InsertIndex, Item);
+          FInjectedItems.Add(Item);
+        end;
       end;
     end;
 
