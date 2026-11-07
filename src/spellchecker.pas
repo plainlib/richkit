@@ -494,6 +494,22 @@ begin
   // Signal that the component is being destroyed
   FDestroying := True;
 
+  // Wait for an in-progress dictionary download to finish. The downloader
+  // runs its own worker thread that holds the URL strings and internal
+  // objects passed to DownloadFiles. If we return before it completes, those
+  // objects are never freed and heaptrc reports them as leaks on exit.
+  // The callback sets FDownloading to False and, because FDestroying is
+  // already True, exits without touching the destroyed component, so this
+  // loop is safe and does not start a new dictionary load.
+  if FDownloading then
+  begin
+    while FDownloading do
+    begin
+      Sleep(10);
+      CheckSynchronize;
+    end;
+  end;
+
   // Cancel and wait for any pending async dictionary load. The loading thread
   // runs LoadFromFiles/LoadFromStream which cannot be interrupted, so we must
   // wait for it to finish before freeing the component.
